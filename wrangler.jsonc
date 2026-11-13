@@ -1,0 +1,34 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ai-gateway",
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2025-10-01",
+  "workers_dev": true,
+  "observability": { "enabled": true },
+
+  // Dashboard (built by Vite) is served as static assets from the same Worker.
+  // Requests to /v1/* (proxy) and /api/* (admin API) always hit the Worker first.
+  "assets": {
+    "directory": "./dist/ui",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/v1/*", "/api/*"]
+  },
+
+  // `npm run setup` creates the database and fills in database_id automatically.
+  // The "Deploy to Cloudflare" button provisions it for you as well.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "ai-gateway",
+      "database_id": "52bf23b0-e922-4603-a8b4-a681d5d0b635",
+      "migrations_dir": "migrations"
+    }
+  ],
+
+  // */15 → re-check exhausted keys, refresh balances, clear cooldowns
+  // 0 3 * * * → delete request logs older than the retention period
+  "triggers": {
+    "crons": ["*/15 * * * *", "0 3 * * *"]
+  }
+}

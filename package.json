@@ -1,0 +1,50 @@
+{
+  "name": "ai-relay-gateway",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Multi-provider, multi-key AI relay gateway with automatic key rotation and provider failover. Runs free on Cloudflare Workers.",
+  "type": "module",
+  "scripts": {
+    "dev": "npm run build:ui && wrangler dev",
+    "dev:ui": "vite",
+    "build:ui": "vite build",
+    "build": "npm run build:ui",
+    "deploy": "npm run build:ui && wrangler d1 migrations apply DB --remote && wrangler deploy",
+    "setup": "node scripts/setup.mjs",
+    "db:migrate:local": "wrangler d1 migrations apply DB --local",
+    "db:migrate:remote": "wrangler d1 migrations apply DB --remote",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.ui.json",
+    "test": "vitest run",
+    "cf-typegen": "wrangler types"
+  },
+  "cloudflare": {
+    "bindings": {
+      "ADMIN_PASSWORD": {
+        "description": "Password for the gateway admin dashboard."
+      },
+      "ENCRYPTION_KEY": {
+        "description": "Secret used to encrypt upstream API keys at rest (any long random string, e.g. `openssl rand -base64 32`)."
+      },
+      "SESSION_SECRET": {
+        "description": "Secret used to sign dashboard session cookies (any long random string)."
+      }
+    }
+  },
+  "dependencies": {
+    "hono": "^4.13.18"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.23.0",
+    "@cloudflare/workers-types": "^5.20261112.1",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8",
+    "vitest": "^4.1.12",
+    "wrangler": "^4.161.0"
+  },
+  "allowScripts": {
+    "esbuild@0.28.1": true,
+    "esbuild@0.28.2": true,
+    "workerd@1.20260815.1": true,
+    "workerd@1.20261110.1": true
+  }
+}
