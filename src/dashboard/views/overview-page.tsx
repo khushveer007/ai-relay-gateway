@@ -6,6 +6,7 @@ import { providersQuery, statsQuery } from '@/lib/queries';
 import { OverviewError } from './overview/overview-error';
 import { OverviewHeader } from './overview/overview-header';
 import { KpiCards } from './overview/kpi-cards';
+import { TrafficChart } from './overview/traffic-chart';
 
 // Named overview-page (not overview) because src/dashboard/views/overview.ts stays until plan 01-08,
 // and a bare './views/overview' import would resolve to that old .ts file first.
@@ -63,6 +64,7 @@ export default function OverviewView() {
         providers={providers}
         providersLoading={providersQ.isFetching}
       />
+      <TrafficChart range={range} stats={stats} isLoading={statsQ.isFetching} isFailed={statsFailed} />
     </div>
   );
 }
