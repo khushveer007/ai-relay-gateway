@@ -1,7 +1,7 @@
 import { useEffect } from 'react';
-import { useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { setUnauthorizedHandler } from '@/lib/api';
+import { api, ApiError, setUnauthorizedHandler } from '@/lib/api';
 import { sessionQuery } from '@/lib/queries';
 
 export interface SessionInfo {
@@ -40,4 +40,23 @@ export function useUnauthorizedHandler(): void {
       toast.error('Session expired — please sign in again.');
     });
   }, [queryClient]);
+}
+
+/**
+ * Sign Out. The session ends only after the server confirms the cookie is cleared, or answers 401
+ * (already signed out; the unauthorized handler has then ended the session and toasted). Any other
+ * failure leaves the operator signed in and says so, so the UI never looks signed out while the
+ * cookie is still valid (T-01-12). `api.post` adds the JSON content-type the CSRF guard needs.
+ */
+export function useSignOut() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    retry: false,
+    mutationFn: () => api.post('/logout'),
+    onSuccess: () => endSession(queryClient),
+    onError: (err) => {
+      if (err instanceof ApiError && err.status === 401) return;
+      toast.error('Could not sign out. Check your connection and try again.');
+    },
+  });
 }

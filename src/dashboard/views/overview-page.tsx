@@ -8,7 +8,7 @@ export default function OverviewView() {
   const stats = useQuery(statsQuery('24h'));
 
   return (
-    <main className="mx-auto flex min-h-dvh max-w-5xl flex-col gap-4 p-4">
+    <div className="flex flex-col gap-4">
       <Card>
         <CardHeader>
           <CardTitle className="text-sm font-normal text-muted-foreground">Requests (24h)</CardTitle>
@@ -25,6 +25,6 @@ export default function OverviewView() {
           )}
         </CardContent>
       </Card>
-    </main>
+    </div>
   );
 }
