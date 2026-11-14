@@ -5,6 +5,7 @@ import {
   RANGES,
   RANGE_LABEL,
   RANGE_STORAGE_KEY,
+  alignSeries,
   fillSeries,
   keyDetailText,
   keyLabel,
@@ -173,6 +174,36 @@ describe('overview: fillSeries', () => {
     expect(out.map((b) => b.bucket)).toEqual([1, 100]);
     expect(out[0]!.ok).toBe(3);
     expect(fillSeries(input, 0, -5, 1000)).toHaveLength(2);
+  });
+});
+
+describe('overview: alignSeries', () => {
+  const H = 3_600_000;
+  const row = (bucket: number, requests: number, errors = 0, failovers = 0) => ({
+    bucket,
+    requests,
+    errors,
+    failovers,
+  });
+
+  it('leaves already aligned buckets unchanged', () => {
+    expect(alignSeries([row(2 * H, 5, 1, 2), row(4 * H, 3)], H)).toEqual([row(2 * H, 5, 1, 2), row(4 * H, 3)]);
+  });
+
+  it('snaps raw timestamps to their bucket and merges rows in the same slot', () => {
+    const out = alignSeries([row(2 * H + 10, 1, 1, 0), row(2 * H + 999, 2, 0, 1), row(3 * H + 5, 4)], H);
+    expect(out).toEqual([row(2 * H, 3, 1, 1), row(3 * H, 4)]);
+  });
+
+  it('makes unaligned rows reachable by fillSeries', () => {
+    const aligned = alignSeries([row(2 * H + 10, 1)], H);
+    const out = fillSeries(aligned, 2 * H, H, 3 * H);
+    expect(out.map((b) => b.requests)).toEqual([1, 0]);
+  });
+
+  it('returns the input when bucketMs is not positive', () => {
+    const input = [row(7, 1)];
+    expect(alignSeries(input, 0)).toBe(input);
   });
 });
 

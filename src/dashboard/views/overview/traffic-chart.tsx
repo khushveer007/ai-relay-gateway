@@ -4,7 +4,7 @@ import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/com
 import { Skeleton } from '@/components/ui/skeleton';
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from '@/components/ui/chart';
 import { useMediaQuery } from '@/hooks/use-media-query';
-import { fillSeries, type Range, type SeriesPoint } from '@/lib/overview';
+import { alignSeries, fillSeries, type Range, type SeriesPoint } from '@/lib/overview';
 import type { StatsDTO } from '@/lib/api';
 
 const CHART_CONFIG: ChartConfig = {
@@ -44,7 +44,7 @@ export function TrafficChart({ range, stats, isLoading, isFailed }: TrafficChart
   const isCoarsePointer = useMediaQuery('(pointer: coarse)');
   const data = useMemo(() => {
     if (!stats) return [];
-    return fillSeries(stats.series, stats.since, stats.bucket_ms, Date.now());
+    return fillSeries(alignSeries(stats.series, stats.bucket_ms), stats.since, stats.bucket_ms, Date.now());
   }, [stats]);
   const byBucket = useMemo(() => new Map(data.map((d) => [d.bucket, d])), [data]);
   const bucketMs = stats?.bucket_ms ?? 3_600_000;

@@ -51,6 +51,28 @@ function toPoint(s: SeriesInput): SeriesPoint {
 }
 
 /**
+ * Snap every row onto its bucket boundary and merge rows that land in the same slot. The Worker
+ * computes `(ts / ?) * ?` and, when the bound size is divided as a float (seen on local wrangler),
+ * each row comes back as its own "bucket" equal to its raw timestamp. A no-op for aligned data.
+ */
+export function alignSeries<T extends SeriesInput>(series: T[], bucketMs: number): SeriesInput[] {
+  if (!(bucketMs > 0)) return series;
+  const merged = new Map<number, SeriesInput>();
+  for (const s of series) {
+    const bucket = Math.floor(s.bucket / bucketMs) * bucketMs;
+    const hit = merged.get(bucket);
+    if (hit) {
+      hit.requests += s.requests;
+      hit.errors += s.errors;
+      hit.failovers += s.failovers;
+    } else {
+      merged.set(bucket, { bucket, requests: s.requests, errors: s.errors, failovers: s.failovers });
+    }
+  }
+  return [...merged.values()].sort((a, b) => a.bucket - b.bucket);
+}
+
+/**
  * The stats API returns only non-empty buckets. Walk every bucket slot from the aligned start of
  * the time span to the later of `now` and the last returned bucket, filling gaps with zeros.
  */
