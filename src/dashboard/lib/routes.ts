@@ -1,7 +1,22 @@
-// Neutral stub so the RED tests fail on assertions, not on an import error.
-export const VIEW_IDS = [] as const;
-export type ViewId = 'overview' | 'providers' | 'routes' | 'gateway-keys' | 'logs' | 'settings';
-export const NAV_LABEL = {} as Record<ViewId, string>;
-export function parseHash(_hash: string): ViewId {
-  return 'logs';
+// Pure and DOM-free (no imports), so Vitest can load it without a browser.
+export const VIEW_IDS = ['overview', 'providers', 'routes', 'gateway-keys', 'logs', 'settings'] as const;
+
+export type ViewId = (typeof VIEW_IDS)[number];
+
+export const NAV_LABEL: Record<ViewId, string> = {
+  overview: 'Overview',
+  providers: 'Providers & Keys',
+  routes: 'Routes & Chains',
+  'gateway-keys': 'Gateway Keys',
+  logs: 'Request Logs',
+  settings: 'Rules & Settings',
+};
+
+/**
+ * Maps a location hash to a view id. Accepts `#/id` and `#id`; anything else (empty, unknown,
+ * extra path segments) falls back to Overview. The hash never reaches the DOM as markup (T-01-11).
+ */
+export function parseHash(hash: string): ViewId {
+  const id = hash.replace(/^#\/?/, '');
+  return (VIEW_IDS as readonly string[]).includes(id) ? (id as ViewId) : 'overview';
 }
