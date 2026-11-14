@@ -19,6 +19,7 @@ import {
   loginErrorMessage,
   shouldReloadForPreloadError,
 } from '../src/dashboard/lib/guards';
+import { NAV_LABEL, VIEW_IDS, parseHash } from '../src/dashboard/lib/routes';
 
 const NOW = Date.UTC(2026, 10, 14, 12, 0, 0);
 
@@ -236,5 +237,36 @@ describe('guards', () => {
     expect(shouldReloadForPreloadError(NOW, String(NOW - 3_000))).toBe(false);
     expect(shouldReloadForPreloadError(NOW, String(NOW - 11_000))).toBe(true);
     expect(shouldReloadForPreloadError(NOW, 'junk')).toBe(true);
+  });
+});
+
+describe('routes', () => {
+  it('VIEW_IDS holds the six destinations in nav order', () => {
+    expect([...VIEW_IDS]).toEqual(['overview', 'providers', 'routes', 'gateway-keys', 'logs', 'settings']);
+  });
+
+  it('NAV_LABEL maps every id to its exact label', () => {
+    expect(NAV_LABEL).toEqual({
+      overview: 'Overview',
+      providers: 'Providers & Keys',
+      routes: 'Routes & Chains',
+      'gateway-keys': 'Gateway Keys',
+      logs: 'Request Logs',
+      settings: 'Rules & Settings',
+    });
+  });
+
+  it('parseHash accepts #/id and #id', () => {
+    expect(parseHash('#/providers')).toBe('providers');
+    expect(parseHash('#providers')).toBe('providers');
+    expect(parseHash('#/gateway-keys')).toBe('gateway-keys');
+  });
+
+  it('parseHash falls back to overview for empty, unknown and playground hashes', () => {
+    expect(parseHash('')).toBe('overview');
+    expect(parseHash('#')).toBe('overview');
+    expect(parseHash('#/nope')).toBe('overview');
+    expect(parseHash('#/__playground')).toBe('overview');
+    expect(parseHash('#/providers/extra')).toBe('overview');
   });
 });
