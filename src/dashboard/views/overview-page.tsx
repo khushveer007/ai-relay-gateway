@@ -7,6 +7,10 @@ import { OverviewError } from './overview/overview-error';
 import { OverviewHeader } from './overview/overview-header';
 import { KpiCards } from './overview/kpi-cards';
 import { TrafficChart } from './overview/traffic-chart';
+import { AttemptOutcomes } from './overview/attempt-outcomes';
+import { KeyMatrix } from './overview/key-matrix';
+import { ProviderTraffic } from './overview/provider-traffic';
+import { TopModels } from './overview/top-models';
 
 // Named overview-page (not overview) because src/dashboard/views/overview.ts stays until plan 01-08,
 // and a bare './views/overview' import would resolve to that old .ts file first.
@@ -64,7 +68,15 @@ export default function OverviewView() {
         providers={providers}
         providersLoading={providersQ.isFetching}
       />
-      <TrafficChart range={range} stats={stats} isLoading={statsQ.isFetching} isFailed={statsFailed} />
+      <div className="grid gap-8 lg:grid-cols-2">
+        <TrafficChart range={range} stats={stats} isLoading={statsQ.isFetching} isFailed={statsFailed} />
+        <AttemptOutcomes range={range} rows={stats?.actions ?? []} isLoading={statsQ.isFetching} />
+      </div>
+      <KeyMatrix range={range} providers={providers ?? []} stats={stats} isLoading={providersQ.isFetching} />
+      <div className="grid gap-8 lg:grid-cols-2">
+        <ProviderTraffic rows={stats?.by_provider ?? []} providers={providers} isLoading={statsQ.isFetching} />
+        <TopModels rows={stats?.by_model ?? []} isLoading={statsQ.isFetching} />
+      </div>
     </div>
   );
 }
