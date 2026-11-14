@@ -4,10 +4,13 @@
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "types": ["vite/client"],
+    "paths": { "@/*": ["./src/dashboard/*"] },
     "strict": true,
     "skipLibCheck": true,
     "isolatedModules": true,
     "noEmit": true
   },
-  "include": ["src/dashboard/**/*.ts"]
+  "include": ["src/dashboard/**/*.ts", "src/dashboard/**/*.tsx"]
 }
