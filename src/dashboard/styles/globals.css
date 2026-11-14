@@ -1,0 +1,76 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  /* Dark-only: values live on :root, <html class="dark"> is kept for the variant. */
+  --background: hsl(225 32% 6%);
+  --foreground: hsl(220 25% 96%);
+  --card: hsl(225 28% 10%);
+  --card-foreground: hsl(220 25% 96%);
+  --popover: hsl(225 28% 10%);
+  --popover-foreground: hsl(220 25% 96%);
+  --primary: hsl(258 88% 58%);
+  --primary-foreground: hsl(0 0% 100%);
+  --secondary: hsl(225 25% 12%);
+  --secondary-foreground: hsl(220 15% 70%);
+  --muted: hsl(225 25% 12%);
+  --muted-foreground: hsl(220 12% 54%);
+  --accent: hsl(258 88% 66% / 0.14);
+  --accent-foreground: hsl(220 25% 96%);
+  --destructive: hsl(350 84% 60%);
+  --border: hsl(225 20% 25%);
+  --input: hsl(225 20% 25%);
+  --ring: hsl(258 88% 70%);
+  --border-subtle: hsl(225 20% 17%);
+  --cyan: hsl(189 92% 48%);
+  --status-ok: hsl(152 76% 46%);
+  --status-warn: hsl(38 92% 54%);
+  --status-danger: hsl(350 90% 68%);
+  --status-neutral: hsl(220 14% 58%);
+  --radius: 0.625rem;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-cyan: var(--cyan);
+  --color-status-ok: var(--status-ok);
+  --color-status-warn: var(--status-warn);
+  --color-status-danger: var(--status-danger);
+  --color-status-neutral: var(--status-neutral);
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+  --radius-lg: var(--radius);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-sm: calc(var(--radius) - 4px);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground font-sans;
+    background-image:
+      radial-gradient(ellipse 80% 50% at 50% -20%, hsl(258 85% 60% / 0.12), transparent),
+      radial-gradient(ellipse 60% 40% at 90% 10%, hsl(189 90% 45% / 0.07), transparent);
+    background-attachment: fixed;
+  }
+}
