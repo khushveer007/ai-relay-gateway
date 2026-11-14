@@ -18,7 +18,8 @@ It sits between AI coding clients and multiple upstream providers (official Anth
 ├── migrations/
 │   └── 0001_init.sql              # D1 SQLite schema & default global error rules seed
 ├── scripts/
-│   └── setup.mjs                  # Interactive `npm run setup` provisioning & deploy script
+│   ├── setup.mjs                  # Interactive `npm run setup` provisioning & deploy script
+│   └── smoke-dashboard.mjs        # End-to-end smoke check of the built dashboard (`--check-headers` verifies dist/ui/_headers)
 ├── src/
 │   ├── worker/                    # Cloudflare Worker backend (Hono + TypeScript)
 │   │   ├── index.ts               # Worker entry: /v1/* proxy, /api/admin/*, static assets, cron
@@ -45,14 +46,31 @@ It sits between AI coding clients and multiple upstream providers (official Anth
 │   │       ├── model-map.ts       # Exact & glob model mapping and allowlist checks
 │   │       ├── resolve-route.ts   # Route resolution (key-bound → model glob → default)
 │   │       └── select-key.ts      # Sequential & round-robin key ordering (`orderKeys`)
-│   └── dashboard/                 # Single-page admin UI (Vite + Vanilla TypeScript)
+│   └── dashboard/                 # Single-page admin UI (React 19 + Tailwind 4 + shadcn/ui (Radix), built by Vite into `dist/ui`)
 │       ├── index.html             # Dashboard HTML shell
-│       ├── main.ts                # Router, auth session bootstrap, sidebar layout
-│       ├── api.ts                 # Typed admin API client, copy-button & modal helpers
-│       ├── styles/index.css       # Dark glassmorphic UI styles
-│       └── views/                 # Views: overview, providers, routes, gateway-keys, logs, settings
+│       ├── main.tsx               # React entry: QueryClient, ErrorBoundary, mounts <App />
+│       ├── App.tsx                # Session gate (Login vs. AppShell), hash route to view
+│       ├── lib/
+│       │   ├── api.ts             # Typed admin API client, ApiError, 401 handler, DTO types
+│       │   ├── format.ts          # Number, money, time and token formatters
+│       │   ├── overview.ts        # Range, series bucketing/gap-fill and key label helpers
+│       │   ├── guards.ts          # Pure guards, breakpoint constants and shared copy
+│       │   ├── routes.ts          # Hash route ids and nav labels
+│       │   ├── queries.ts         # TanStack Query definitions (stats, providers)
+│       │   └── utils.ts           # `cn` (clsx + tailwind-merge)
+│       ├── hooks/                 # use-session, use-hash-route, use-range, use-media-query, use-now, use-key-actions
+│       ├── components/            # app-shell, nav, login, error-boundary, responsive-list, responsive-dialog, status-badge
+│       │   └── ui/                # shadcn/ui primitives (badge, button, card, chart, dialog, drawer, sheet, table, ...)
+│       ├── views/                 # overview-page.tsx, next-phase.tsx (placeholder for pages rebuilt in Phase 2), __playground.tsx (dev-only test page)
+│       │   └── overview/          # Overview pieces: header, KPI cards, traffic chart, key matrix, attempt outcomes, provider traffic, top models
+│       ├── styles/globals.css     # Tailwind 4 theme tokens and dark UI styles
+│       └── public/                # favicon.svg and `_headers` (immutable cache rule for hashed assets)
+├── components.json                # shadcn/ui CLI config (radix-nova style, `@/` alias to src/dashboard)
 ├── test/
-│   └── gateway.test.ts            # Vitest unit & integration test suite
+│   ├── gateway.test.ts            # Vitest unit & integration test suite (Worker)
+│   ├── stats.test.ts              # Vitest test for stats time-series bucketing
+│   ├── dashboard-lib.test.ts      # Vitest tests for dashboard `lib/` helpers (no DOM)
+│   └── raw-imports.d.ts           # Type shim for `?raw` SQL imports in tests
 ├── wrangler.jsonc                 # Cloudflare Worker, D1, Assets, and Cron configuration
 ├── vite.config.ts                 # Vite build config (outputs to dist/ui)
 └── vitest.config.ts               # Vitest configuration
@@ -79,8 +97,9 @@ It sits between AI coding clients and multiple upstream providers (official Anth
 ## Development Commands
 
 - `npm run dev` — Build the dashboard UI and start `wrangler dev` on `http://localhost:8787`.
-- `npm run dev:ui` — Start Vite dev server on `http://localhost:5173` (proxying `/api` and `/v1` to `:8787`).
+- `npm run dev:ui` — Start Vite dev server on `http://localhost:5173` (proxying `/api` and `/v1` to `:8787`). It also serves the dev-only primitive test page at `#/__playground`; that page is absent from the production build, so `npm run dev` never shows it.
 - `npm run build` — Build the dashboard into `dist/ui`.
 - `npm run typecheck` — Type-check both the Worker (`tsconfig.json`) and Dashboard (`tsconfig.ui.json`).
-- `npm test` — Run the Vitest test suite (`test/gateway.test.ts`).
+- `npm test` — Run the Vitest test suite (`test/gateway.test.ts`, `test/stats.test.ts`, `test/dashboard-lib.test.ts`).
+- `node scripts/smoke-dashboard.mjs` — Run the end-to-end smoke check of the built dashboard (add `--check-headers` to also verify `dist/ui/_headers`).
 - `npm run setup` — Interactive provisioning & deployment to Cloudflare.
