@@ -9,7 +9,7 @@ import { PageHeader } from '@/components/page-header';
 import { useLoadErrorToast } from '@/hooks/use-load-error-toast';
 import { gatewayKeysQuery, routesQuery } from '@/lib/queries';
 import { ClientSetup } from './gateway-keys/client-setup';
-import { CreateKeyDialog } from './gateway-keys/create-key-dialog';
+import { CreateKeyDialog, useRevealedGatewayKey } from './gateway-keys/create-key-dialog';
 import { GatewayKeyCard } from './gateway-keys/gateway-key-card';
 
 const LOAD_MESSAGE = 'Failed to load Gateway Keys. Check your connection and try again.';
@@ -37,6 +37,7 @@ export default function GatewayKeysView() {
   const keysQ = useQuery(gatewayKeysQuery);
   const routesQ = useQuery(routesQuery);
   const [creating, setCreating] = useState(false);
+  const revealed = useRevealedGatewayKey();
   useLoadErrorToast(keysQ, 'gateway-keys-load', LOAD_MESSAGE);
 
   const keys = keysQ.data?.keys;
@@ -90,8 +91,8 @@ export default function GatewayKeysView() {
       />
       {body}
       <ClientSetup />
-      {/* Mounted only while open, so the form and any revealed key are gone once it closes. */}
-      {creating ? <CreateKeyDialog open onOpenChange={setCreating} routes={routes} /> : null}
+      {/* Mounted only while open (or while a revealed one-time key is waiting to be copied), so a hash swap cannot drop it. */}
+      {creating || revealed !== null ? <CreateKeyDialog open onOpenChange={setCreating} routes={routes} /> : null}
     </div>
   );
 }

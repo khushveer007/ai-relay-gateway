@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -21,23 +21,49 @@ const NAME_ID = 'create-key-name';
 const ROUTE_ID = 'create-key-route';
 const FORM_ID = 'create-key-form';
 
+// In-memory store for the one-time key so a hash change mid-request or mid-reveal cannot discard it.
+// Never written to web storage, URLs or the TanStack cache; cleared only when the user closes the reveal view.
+let revealedKey: string | null = null;
+const revealedListeners = new Set<() => void>();
+
+function setRevealedKey(next: string | null) {
+  revealedKey = next;
+  for (const fn of revealedListeners) fn();
+}
+
+export function useRevealedGatewayKey(): string | null {
+  return useSyncExternalStore(
+    (onStoreChange) => {
+      revealedListeners.add(onStoreChange);
+      return () => revealedListeners.delete(onStoreChange);
+    },
+    () => revealedKey,
+  );
+}
+
 /**
- * Create, then reveal in the same dialog (D-24). The one-time key lives only in this component's state:
+ * Create, then reveal in the same dialog (D-24). The one-time key lives only in this module's memory:
  * the mutation has gcTime 0 and is reset() the moment it answers, so the TanStack mutation cache never
- * holds the plaintext; it is never put in a toast, URL, storage or query key. The reveal view cannot be
- * dismissed by tap-outside, swipe or Escape, and closing it discards the key.
+ * holds the plaintext; it is never put in a toast, URL, storage or query key. Android Back is guarded
+ * via a history state entry so Back cannot unmount the dialog while a key is revealed or in flight.
  */
 export function CreateKeyDialog({ open, onOpenChange, routes }: CreateKeyDialogProps) {
   const queryClient = useQueryClient();
   const [name, setName] = useState('');
   const [routeId, setRouteId] = useState('');
   const [attempted, setAttempted] = useState(false);
-  const [revealed, setRevealed] = useState<string | null>(null);
+  const revealed = useRevealedGatewayKey();
   const keyRef = useRef<HTMLElement | null>(null);
+  const closingFromUi = useRef(false);
 
   const create = useMutation({
     gcTime: 0,
-    mutationFn: (vars: { name: string; route_id: number | null }) => api.post<{ key: string }>('/gateway-keys', vars),
+    mutationFn: async (vars: { name: string; route_id: number | null }) => {
+      const res = await api.post<{ key: string }>('/gateway-keys', vars);
+      // Set in the store before React observers run so an unmount mid-flight still keeps the reveal.
+      setRevealedKey(res.key);
+      return res;
+    },
     onSuccess: () => {
       toast.success('Gateway key created.');
       void queryClient.invalidateQueries({ queryKey: ['gateway-keys'] });
@@ -45,6 +71,41 @@ export function CreateKeyDialog({ open, onOpenChange, routes }: CreateKeyDialogP
   });
   const pending = create.isPending;
   const nameError = name.trim() ? undefined : 'Enter a name.';
+
+  const stateRef = useRef({ revealed: false, pending: false });
+  stateRef.current = { revealed: revealed !== null, pending };
+
+  useEffect(() => {
+    if (!(window.history.state as { gwDialog?: boolean } | null)?.gwDialog) {
+      window.history.pushState({ gwDialog: true }, '');
+    }
+    const onPop = () => {
+      if (closingFromUi.current) {
+        closingFromUi.current = false;
+        return;
+      }
+      if (stateRef.current.revealed) {
+        window.history.pushState({ gwDialog: true }, '');
+        toast.info('Copy the key, then tap Done. It cannot be shown again.', { id: 'gateway-key-back' });
+        return;
+      }
+      if (stateRef.current.pending) {
+        window.history.pushState({ gwDialog: true }, '');
+        return;
+      }
+      onOpenChange(false);
+    };
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, [onOpenChange]);
+
+  const closeFromUi = () => {
+    if ((window.history.state as { gwDialog?: boolean } | null)?.gwDialog) {
+      closingFromUi.current = true;
+      window.history.back();
+    }
+    onOpenChange(false);
+  };
 
   const submit = () => {
     if (pending) return;
@@ -56,9 +117,8 @@ export function CreateKeyDialog({ open, onOpenChange, routes }: CreateKeyDialogP
     create.mutate(
       { name: name.trim(), route_id: routeId === '' ? null : Number(routeId) },
       {
-        onSuccess: (res) => {
-          setRevealed(res.key);
-          // The key now lives in state only: drop it from the mutation cache at once.
+        onSuccess: () => {
+          // The key now lives in the module store only: drop it from the mutation cache at once.
           create.reset();
         },
       },
@@ -66,8 +126,8 @@ export function CreateKeyDialog({ open, onOpenChange, routes }: CreateKeyDialogP
   };
 
   const done = () => {
-    setRevealed(null);
-    onOpenChange(false);
+    setRevealedKey(null);
+    closeFromUi();
   };
 
   if (revealed !== null) {
@@ -107,13 +167,16 @@ export function CreateKeyDialog({ open, onOpenChange, routes }: CreateKeyDialogP
     <ResponsiveDialog
       open={open}
       onOpenChange={(next) => {
-        if (!pending) onOpenChange(next);
+        if (!pending) {
+          if (next) onOpenChange(true);
+          else closeFromUi();
+        }
       }}
       title="Create gateway key"
       dismissible={!pending}
       footer={
         <>
-          <Button type="button" variant="outline" className="flex-1 md:flex-none" onClick={() => onOpenChange(false)} disabled={pending}>
+          <Button type="button" variant="outline" className="flex-1 md:flex-none" onClick={closeFromUi} disabled={pending}>
             Discard key
           </Button>
           <Button type="submit" form={FORM_ID} className="flex-1 md:flex-none" disabled={pending}>
