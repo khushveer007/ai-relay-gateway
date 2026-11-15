@@ -148,13 +148,28 @@ export function buildProviderPayload(form: ProviderForm, mode: FormMode): Record
   return payload;
 }
 
-// RED stubs: the real validation and reducer arrive in the GREEN commit.
 export type FormErrors = Partial<Record<'name' | 'base_url', string>>;
 
-export function validateProviderForm(_form: ProviderForm, _mode: FormMode): FormErrors {
-  return { name: 'stub' };
+const URL_MESSAGE = 'Enter a full URL starting with http:// or https://.';
+
+function isHttpUrl(raw: string): boolean {
+  try {
+    const u = new URL(raw.trim());
+    return u.protocol === 'http:' || u.protocol === 'https:';
+  } catch {
+    return false;
+  }
 }
 
+/** Inline errors for the basics. Advanced numeric and map validation arrives in plan 02-02. */
+export function validateProviderForm(form: ProviderForm, _mode: FormMode): FormErrors {
+  const errors: FormErrors = {};
+  if (!form.name.trim()) errors.name = 'Enter a name.';
+  if (!isHttpUrl(form.base_url)) errors.base_url = URL_MESSAGE;
+  return errors;
+}
+
+/** The Worker's answer to POST /providers/test-connection. */
 export interface TestResult {
   ok: boolean;
   count?: number;
@@ -164,6 +179,7 @@ export interface TestResult {
 }
 
 export interface TestState {
+  /** Id of the latest start or reset; a settle only applies while it still matches. */
   id: number;
   status: 'idle' | 'running' | 'done';
   result: TestResult | null;
@@ -173,6 +189,18 @@ export type TestAction = { type: 'start'; id: number } | { type: 'settle'; id: n
 
 export const initialTestState: TestState = { id: 0, status: 'idle', result: null };
 
-export function testReducer(state: TestState, _action: TestAction): TestState {
-  return state;
+/**
+ * Keeps Test connection honest: a second start while one is running is ignored (one request), a
+ * result whose id is stale is discarded, and reset (URL, headers or keys changed) invalidates a
+ * running test so its late answer never shows against the new input.
+ */
+export function testReducer(state: TestState, action: TestAction): TestState {
+  switch (action.type) {
+    case 'start':
+      return state.status === 'running' ? state : { id: action.id, status: 'running', result: null };
+    case 'settle':
+      return state.status === 'running' && action.id === state.id ? { id: state.id, status: 'done', result: action.result } : state;
+    case 'reset':
+      return { id: state.id + 1, status: 'idle', result: null };
+  }
 }
