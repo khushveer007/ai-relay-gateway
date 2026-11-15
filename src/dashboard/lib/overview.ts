@@ -114,7 +114,19 @@ export function keyDetailText(key: KeyTextInput): string {
   return detail;
 }
 
-/** RED stub: replaced in the GREEN commit. */
+/**
+ * The reason line under a key row (D-06): the status reason, plus when a rate-limited key is back or
+ * an exhausted key is rechecked, but only while that time is still ahead. Null when there is no reason.
+ * Overview keeps `keyDetailText`; this one is for the Providers page.
+ */
 export function keyReasonLine(key: KeyTextInput): string | null {
-  return key.status_reason ? 'stub' : null;
+  if (!key.status_reason) return null;
+  const now = Date.now();
+  if (key.status === 'rate_limited' && key.cooldown_until && key.cooldown_until > now) {
+    return `${key.status_reason} · back ${fmtAgo(key.cooldown_until)}`;
+  }
+  if (key.status === 'exhausted' && key.next_recheck_at && key.next_recheck_at > now) {
+    return `${key.status_reason} · recheck ${fmtAgo(key.next_recheck_at)}`;
+  }
+  return key.status_reason;
 }

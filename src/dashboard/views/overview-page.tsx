@@ -49,7 +49,7 @@ export default function OverviewView() {
         isFetching={isFetching}
         updatedAt={statsQ.dataUpdatedAt}
       />
-      {anyFailed && <PageError message={LOAD_MESSAGE} onRefresh={handleRefresh} isFetching={isFetching} />}
+      {anyFailed && <PageError message={LOAD_MESSAGE} onRefresh={handleRefresh} refreshing={isFetching} />}
       <KpiCards
         range={range}
         stats={stats}

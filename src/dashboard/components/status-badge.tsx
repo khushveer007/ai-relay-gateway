@@ -47,3 +47,13 @@ export function ActionBadge({ action }: { action: Action | 'OK' | string }) {
   const tone = ACTION_TONE[action] ?? 'neutral';
   return <Badge variant="outline" className={cn('border-transparent', TONE_CLASS[tone])}>{actionLabel(action)}</Badge>;
 }
+
+/** Enabled or disabled pill for a provider or a gateway key: same outline Badge and tones as KeyStatusBadge. */
+export function EnabledBadge({ enabled }: { enabled: boolean }) {
+  return (
+    <Badge variant="outline" className={cn('border-transparent', TONE_CLASS[enabled ? 'ok' : 'neutral'])}>
+      {toneDot()}
+      {enabled ? 'enabled' : 'disabled'}
+    </Badge>
+  );
+}
