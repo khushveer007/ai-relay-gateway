@@ -35,7 +35,8 @@ function authHeaders(key: string, extra: Record<string, string>): Headers {
 
 async function getJson(url: string, key: string, extra: Record<string, string>): Promise<any> {
   const res = await fetch(url, { headers: authHeaders(key, extra), signal: AbortSignal.timeout(TIMEOUT) });
-  const text = await res.text();
+  // Redact before truncating: a key that straddles the cut would otherwise leave its first characters behind.
+  const text = key ? (await res.text()).split(key).join('***') : await res.text();
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
   try {
     return JSON.parse(text);

@@ -746,6 +746,18 @@ describe('Full Proxy Failover & Admin Integration', () => {
       expect(await net.json()).toMatchObject({ ok: false, status: 0 });
     });
 
+    it('WR-04: a key echoed across the 200-character cut is redacted before truncation', async () => {
+      const key = 'sk-secret-echo-straddle-1234567890';
+      const body = `{"error":"${'x'.repeat(150)} token ${key}"}`;
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(body, { status: 401 }));
+      const cookie = await adminCookie();
+      const tested = await adminPost(cookie, '/providers/test-connection', { base_url: 'https://new-relay.test', keys: key });
+      const text = await tested.text();
+      expect(text).not.toContain(key.slice(0, 12));
+      expect(JSON.parse(text)).toMatchObject({ ok: false, status: 401 });
+      expect(JSON.parse(text).message).toContain('***');
+    });
+
     it('WR-03: a 200 that is not a model list, or not JSON, is reported as a 200 verdict, not as success or unreachable', async () => {
       const cookie = await adminCookie();
       vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('{"error":{"message":"bad token"}}', { status: 200 }));
