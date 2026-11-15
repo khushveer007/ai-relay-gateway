@@ -183,12 +183,17 @@ export function ResponsiveList<T>({
               <>
                 {titleCol ? <div className="min-w-0 text-sm font-semibold break-words">{titleCol.cell(row)}</div> : null}
                 <dl className="flex flex-col gap-2">
-                  {detailCols.map((col) => (
-                    <div key={col.key} className="flex flex-col gap-0.5">
-                      <dt className="text-xs font-semibold text-muted-foreground">{mobileLabelOf(col)}</dt>
-                      <dd className="min-w-0 text-sm break-words">{col.cell(row)}</dd>
-                    </div>
-                  ))}
+                  {detailCols.map((col) => {
+                    const value = col.cell(row);
+                    // A cell with nothing to show (no note, for example) leaves its label out of the card.
+                    if (value === null || value === undefined || value === false) return null;
+                    return (
+                      <div key={col.key} className="flex flex-col gap-0.5">
+                        <dt className="text-xs font-semibold text-muted-foreground">{mobileLabelOf(col)}</dt>
+                        <dd className="min-w-0 text-sm break-words">{value}</dd>
+                      </div>
+                    );
+                  })}
                 </dl>
                 {renderActions ? <div className="flex flex-wrap gap-2">{renderActions(row)}</div> : null}
               </>
