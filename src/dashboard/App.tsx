@@ -5,20 +5,20 @@ import { Login } from '@/components/login';
 import { useView } from '@/hooks/use-hash-route';
 import { useSession, useSignOut, useUnauthorizedHandler } from '@/hooks/use-session';
 import { loginErrorMessage } from '@/lib/guards';
-import { NAV_LABEL, VIEW_IDS, type ViewId } from '@/lib/routes';
+import { VIEW_IDS, type ViewId } from '@/lib/routes';
 
 // One chunk per view file, so a tab left open across a deploy fails a chunk load (and recovers by
 // reloading, FND-04) instead of holding every view in one bundle. No manual chunk config.
-const NextPhaseView = lazy(() => import('./views/next-phase'));
-
-// View registry: every file matching views/*-page.tsx whose name is a ViewId becomes that view, so a
-// later page plan adds one file and this file is not edited again. A view without a file falls back
-// to NextPhaseView (removed once every page exists).
+//
+// View registry: every file matching views/*-page.tsx whose name is a ViewId becomes that view. It is
+// strict: a ViewId without a page file throws at module load, so a missing page is a build-time
+// finding and never a silent placeholder.
 const PAGE_LOADERS = import.meta.glob<{ default: ComponentType }>('./views/*-page.tsx');
-const PAGES: Partial<Record<ViewId, ComponentType>> = {};
+const PAGES = {} as Record<ViewId, ComponentType>;
 for (const id of VIEW_IDS) {
   const loader = PAGE_LOADERS[`./views/${id}-page.tsx`];
-  if (loader) PAGES[id] = lazy(loader);
+  if (!loader) throw new Error(`No page file for view "${id}": expected src/dashboard/views/${id}-page.tsx`);
+  PAGES[id] = lazy(loader);
 }
 
 // Dev-only test page (D-10). Every reference to it, including the hash string, sits inside an
@@ -53,7 +53,7 @@ function SessionApp() {
     const Page = PAGES[view];
     body = (
       <AppShell view={view} onSignOut={() => signOut.mutate()} signingOut={signOut.isPending}>
-        {Page ? <Page /> : <NextPhaseView title={NAV_LABEL[view]} />}
+        <Page />
       </AppShell>
     );
   }
