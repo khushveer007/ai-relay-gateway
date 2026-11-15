@@ -47,3 +47,8 @@ export function fmtMs(v: number | null | undefined): string {
   if (!v) return '—';
   return `${v} ms`;
 }
+
+// RED stub: the real helper arrives in the GREEN commit.
+export function actionLabel(_action: string): string {
+  return '';
+}

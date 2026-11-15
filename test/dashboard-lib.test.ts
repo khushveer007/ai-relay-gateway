@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fmtAgo, fmtBalance, fmtMs, fmtNum, fmtTime, fmtTokens, fmtTokensOrDash } from '../src/dashboard/lib/format';
+import { actionLabel, fmtAgo, fmtBalance, fmtMs, fmtNum, fmtTime, fmtTokens, fmtTokensOrDash } from '../src/dashboard/lib/format';
+import { ALL_ACTIONS } from '../src/worker/types';
 import {
   DEFAULT_RANGE,
   RANGES,
@@ -299,5 +300,15 @@ describe('routes', () => {
     expect(parseHash('#/nope')).toBe('overview');
     expect(parseHash('#/__playground')).toBe('overview');
     expect(parseHash('#/providers/extra')).toBe('overview');
+  });
+});
+
+describe('actionLabel', () => {
+  it('maps every action, and OK, to a non-empty string', () => {
+    for (const action of [...ALL_ACTIONS, 'OK']) expect(actionLabel(action).length).toBeGreaterThan(0);
+  });
+
+  it('returns the current action name unchanged in this phase (D-28)', () => {
+    for (const action of [...ALL_ACTIONS, 'OK']) expect(actionLabel(action)).toBe(action);
   });
 });
