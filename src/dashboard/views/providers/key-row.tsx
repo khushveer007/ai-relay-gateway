@@ -1,11 +1,20 @@
+import { useState } from 'react';
 import { Ellipsis } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import { ConfirmDialog } from '@/components/confirm-dialog';
 import { KeyStatusBadge } from '@/components/status-badge';
-import { useDisableKey, useEnableKey, useRecheckKey, useTestKey } from '@/hooks/use-key-actions';
+import { useDeleteKey, useDisableKey, useEnableKey, useRecheckKey, useRenameKey, useTestKey } from '@/hooks/use-key-actions';
 import type { ProviderKeyDTO } from '@/lib/api';
 import { fmtAgo, fmtBalance } from '@/lib/format';
 import { keyReasonLine } from '@/lib/overview';
+import { RenameKeyDialog } from './rename-key-dialog';
 
 interface KeyRowProps {
   keyDto: ProviderKeyDTO;
@@ -26,6 +35,11 @@ export function KeyRow({ keyDto, index, count, reordering, onMove }: KeyRowProps
   const disable = useDisableKey();
   const test = useTestKey();
   const recheck = useRecheckKey();
+  const rename = useRenameKey();
+  const del = useDeleteKey();
+  // Both dialogs and the alias draft live here, as siblings of the menu, never inside its content (D-10, D-15).
+  const [dialog, setDialog] = useState<'rename' | 'delete' | null>(null);
+  const [aliasDraft, setAliasDraft] = useState('');
   const reason = keyReasonLine(keyDto);
   const isActive = keyDto.status === 'active';
   const label = keyDto.alias || keyDto.key_hint;
@@ -89,9 +103,43 @@ export function KeyRow({ keyDto, index, count, reordering, onMove }: KeyRowProps
             <DropdownMenuItem disabled={reordering || index === count - 1} onSelect={() => onMove(keyDto.id, 1)}>
               Move down
             </DropdownMenuItem>
+            <DropdownMenuItem
+              onSelect={() => {
+                setAliasDraft(keyDto.alias);
+                // The menu closes first; opening on the next frame keeps Radix's pointer-events lock from sticking on the page.
+                requestAnimationFrame(() => setDialog('rename'));
+              }}
+            >
+              Rename
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem variant="destructive" onSelect={() => requestAnimationFrame(() => setDialog('delete'))}>
+              Delete key
+            </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
+      <RenameKeyDialog
+        open={dialog === 'rename'}
+        onOpenChange={(open) => setDialog(open ? 'rename' : null)}
+        alias={aliasDraft}
+        onAliasChange={setAliasDraft}
+        onSave={async () => {
+          await rename.mutateAsync({ id: keyDto.id, alias: aliasDraft.trim() });
+        }}
+      />
+      <ConfirmDialog
+        open={dialog === 'delete'}
+        onOpenChange={(open) => setDialog(open ? 'delete' : null)}
+        title={`Delete key "${label}"?`}
+        body="Requests stop using this key. This cannot be undone."
+        confirmLabel="Delete key"
+        pendingLabel="Deleting…"
+        keepLabel="Keep key"
+        onConfirm={async () => {
+          await del.mutateAsync({ id: keyDto.id, label });
+        }}
+      />
     </div>
   );
 }

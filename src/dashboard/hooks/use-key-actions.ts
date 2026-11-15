@@ -114,3 +114,36 @@ export function useReorderKeys(providerId: number) {
     },
   });
 }
+
+/**
+ * Rename a key (PUT /keys/:id { alias }). No error toast: the rename dialog drives this with
+ * `mutateAsync` and shows the error inline.
+ */
+export function useRenameKey() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, alias }: { id: number; alias: string }) => api.put(`/keys/${id}`, { alias }),
+    onSuccess: () => {
+      toast.success('Key renamed.');
+    },
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: ['providers'] });
+      void queryClient.invalidateQueries({ queryKey: ['stats'] });
+    },
+  });
+}
+
+/** Delete a key (DELETE /keys/:id). No error toast: the confirm dialog shows the error inline. */
+export function useDeleteKey() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id }: { id: number; label: string }) => api.del(`/keys/${id}`),
+    onSuccess: (_res, { label }) => {
+      toast.success(`Deleted ${label}.`);
+    },
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: ['providers'] });
+      void queryClient.invalidateQueries({ queryKey: ['stats'] });
+    },
+  });
+}
