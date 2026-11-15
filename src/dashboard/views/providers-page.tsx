@@ -86,7 +86,7 @@ export default function ProvidersView() {
       />
       {body}
       {/* Mounted only while open, so the form resets every time the dialog opens. */}
-      {adding ? <ProviderFormDialog open onOpenChange={setAdding} /> : null}
+      {adding ? <ProviderFormDialog open onOpenChange={setAdding} mode="create" /> : null}
     </div>
   );
 }
