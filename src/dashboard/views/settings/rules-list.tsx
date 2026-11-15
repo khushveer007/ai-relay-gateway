@@ -26,34 +26,47 @@ function DisabledMark({ rule }: { rule: ErrorRuleDTO }) {
   );
 }
 
-function RuleActions({ rule, providers, actions }: { rule: ErrorRuleDTO; providers: ProviderDTO[]; actions: Action[] }) {
-  const del = useDeleteRule(rule.id);
-  const [dialog, setDialog] = useState<'edit' | 'delete' | null>(null);
+type RuleTarget = { kind: 'edit' | 'delete'; rule: ErrorRuleDTO };
+
+/** Only the two buttons: the dialogs live in `RulesList`, so a table to cards swap cannot close them. */
+function RuleActions({ rule, onTarget }: { rule: ErrorRuleDTO; onTarget: (target: RuleTarget) => void }) {
   return (
     <>
-      <Button variant="outline" size="sm" className="h-11 md:h-8" onClick={() => setDialog('edit')}>
+      <Button variant="outline" size="sm" className="h-11 md:h-8" onClick={() => onTarget({ kind: 'edit', rule })}>
         Edit
       </Button>
-      <Button variant="outline" size="sm" className="h-11 text-destructive md:h-8" onClick={() => setDialog('delete')}>
+      <Button variant="outline" size="sm" className="h-11 text-destructive md:h-8" onClick={() => onTarget({ kind: 'delete', rule })}>
         Delete
       </Button>
-      {dialog === 'edit' ? (
-        <RuleDialog open onOpenChange={(o) => setDialog(o ? 'edit' : null)} mode="edit" rule={rule} providers={providers} actions={actions} />
-      ) : null}
-      <ConfirmDialog
-        open={dialog === 'delete'}
-        onOpenChange={(o) => setDialog(o ? 'delete' : null)}
-        title="Delete this error rule?"
-        body={`${scopeName(rule, providers)}: ${statusText(rule)} → ${actionLabel(rule.action)}. This cannot be undone.`}
-        confirmLabel="Delete rule"
-        pendingLabel="Deleting…"
-        keepLabel="Keep rule"
-        onConfirm={async () => {
-          await del.mutateAsync();
-          toast.success('Rule deleted.');
-        }}
-      />
     </>
+  );
+}
+
+/** A wrapper so `useDeleteRule` always has the id of the rule being deleted. */
+function DeleteRuleConfirm({
+  rule,
+  providers,
+  onOpenChange,
+}: {
+  rule: ErrorRuleDTO;
+  providers: ProviderDTO[];
+  onOpenChange: (open: boolean) => void;
+}) {
+  const del = useDeleteRule(rule.id);
+  return (
+    <ConfirmDialog
+      open
+      onOpenChange={onOpenChange}
+      title="Delete this error rule?"
+      body={`${scopeName(rule, providers)}: ${statusText(rule)} → ${actionLabel(rule.action)}. This cannot be undone.`}
+      confirmLabel="Delete rule"
+      pendingLabel="Deleting…"
+      keepLabel="Keep rule"
+      onConfirm={async () => {
+        await del.mutateAsync();
+        toast.success('Rule deleted.');
+      }}
+    />
   );
 }
 
@@ -66,6 +79,11 @@ interface RulesListProps {
 /** Error rules as cards on phones and a table from 768px. Disabled rules are dimmed and labelled. */
 export function RulesList({ rules, providers, actions }: RulesListProps) {
   const [adding, setAdding] = useState(false);
+  // Owned here, not by each row: ResponsiveList swaps its whole tree at 768px and would unmount a row-owned dialog.
+  const [target, setTarget] = useState<RuleTarget | null>(null);
+  const closeTarget = (open: boolean) => {
+    if (!open) setTarget(null);
+  };
   const dim = (r: ErrorRuleDTO) => (r.enabled ? undefined : 'opacity-60');
 
   const columns: ResponsiveColumn<ErrorRuleDTO>[] = [
@@ -131,7 +149,7 @@ export function RulesList({ rules, providers, actions }: RulesListProps) {
           rows={rules}
           columns={columns}
           getRowKey={(r) => r.id}
-          renderActions={(r) => <RuleActions rule={r} providers={providers} actions={actions} />}
+          renderActions={(r) => <RuleActions rule={r} onTarget={setTarget} />}
           emptyMessage={
             <div className="flex flex-col items-center gap-3">
               <span>No error rules yet. The built-in fallback still applies.</span>
@@ -146,6 +164,10 @@ export function RulesList({ rules, providers, actions }: RulesListProps) {
       </div>
       {/* Mounted only while open, so the form starts fresh each time. */}
       {adding ? <RuleDialog open onOpenChange={setAdding} mode="create" providers={providers} actions={actions} /> : null}
+      {target?.kind === 'edit' ? (
+        <RuleDialog key={target.rule.id} open onOpenChange={closeTarget} mode="edit" rule={target.rule} providers={providers} actions={actions} />
+      ) : null}
+      {target?.kind === 'delete' ? <DeleteRuleConfirm key={target.rule.id} rule={target.rule} providers={providers} onOpenChange={closeTarget} /> : null}
     </Card>
   );
 }
