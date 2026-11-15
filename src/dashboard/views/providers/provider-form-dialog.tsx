@@ -135,6 +135,7 @@ export function ProviderFormDialog({ open, onOpenChange }: ProviderFormDialogPro
         if (!create.isPending) onOpenChange(next);
       }}
       title="Add provider"
+      dismissible={!create.isPending}
       description="Name, URL and keys are enough. Everything else has a working default."
       footer={
         <>

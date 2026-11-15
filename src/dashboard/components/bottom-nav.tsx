@@ -3,6 +3,7 @@ import { Ellipsis } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Drawer, DrawerContent, DrawerHeader, DrawerTitle } from '@/components/ui/drawer';
 import { NAV_ICON, ProxyUrlBox } from '@/components/nav';
+import { useEditableFocus } from '@/hooks/use-editable-focus';
 import { cn } from '@/lib/utils';
 import { BOTTOM_VIEW_IDS, MORE_VIEW_IDS, NAV_LABEL, isMoreActive, type ViewId } from '@/lib/routes';
 
@@ -32,12 +33,18 @@ interface BottomNavProps {
 export function BottomNav({ view, onSignOut, signingOut }: BottomNavProps) {
   const [moreOpen, setMoreOpen] = useState(false);
   const moreActive = isMoreActive(view) || moreOpen;
+  // With interactive-widget=resizes-content a fixed bar would ride on top of the phone keyboard, so it
+  // is hidden while a text field has focus. The More drawer stays mounted.
+  const editing = useEditableFocus();
 
   return (
     <>
       <nav
         aria-label="Dashboard navigation"
-        className="fixed inset-x-0 bottom-0 z-40 border-t border-border-subtle bg-card pb-[env(safe-area-inset-bottom)] md:hidden"
+        className={cn(
+          'fixed inset-x-0 bottom-0 z-40 border-t border-border-subtle bg-card pb-[env(safe-area-inset-bottom)] md:hidden',
+          editing && 'hidden',
+        )}
       >
         <div className="grid grid-cols-5">
           {BOTTOM_VIEW_IDS.map((id) => {
