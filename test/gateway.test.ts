@@ -746,6 +746,21 @@ describe('Full Proxy Failover & Admin Integration', () => {
       expect(await net.json()).toMatchObject({ ok: false, status: 0 });
     });
 
+    it('WR-03: a 200 that is not a model list, or not JSON, is reported as a 200 verdict, not as success or unreachable', async () => {
+      const cookie = await adminCookie();
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('{"error":{"message":"bad token"}}', { status: 200 }));
+      const errBody = await adminPost(cookie, '/providers/test-connection', { base_url: 'https://new-relay.test', keys: 'sk-a' });
+      expect(await errBody.json()).toMatchObject({ ok: false, status: 200, message: expect.stringContaining('did not return a model list') });
+
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('<html>relay</html>', { status: 200 }));
+      const html = await adminPost(cookie, '/providers/test-connection', { base_url: 'https://new-relay.test', keys: 'sk-a' });
+      expect(await html.json()).toMatchObject({ ok: false, status: 200 });
+
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('{"data":[]}', { status: 200 }));
+      const empty = await adminPost(cookie, '/providers/test-connection', { base_url: 'https://new-relay.test', keys: 'sk-a' });
+      expect(await empty.json()).toMatchObject({ ok: true, count: 0 });
+    });
+
     it('D-17 guards: no key is 400, a bad URL is 400, no session is 401, a text/plain body is 415', async () => {
       const cookie = await adminCookie();
       const noKey = await adminPost(cookie, '/providers/test-connection', { base_url: 'https://new-relay.test' });

@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { checkBalance, fetchModels, testKey } from '../balance';
+import { NOT_A_MODEL_LIST, checkBalance, fetchModels, testKey } from '../balance';
 import { recheckKey } from '../cron';
 import { invalidateConfig, plainKey } from '../db/cache';
 import { decrypt, encrypt, keyHint, randomToken, sha256Hex } from '../db/crypto';
@@ -306,11 +306,15 @@ s.post('/providers/test-connection', async (c) => {
   if (!apiKey) throw bad('no key to test with');
   const t0 = Date.now();
   try {
-    const models = await fetchModels({ base_url, extra_headers }, apiKey);
+    const models = await fetchModels({ base_url, extra_headers }, apiKey, { strict: true });
     return c.json({ ok: true, count: models.length, ms: Date.now() - t0 });
   } catch (e) {
     // The admin call itself worked, so answer 200 and let the client show the relay's verdict.
     const msg = String((e as Error).message ?? e).split(apiKey).join('***').slice(0, 300);
+    // A 200 whose body is not JSON (usually the relay's web page) did reach the host: report it as a 200, not as unreachable.
+    if (msg.startsWith('not JSON:')) {
+      return c.json({ ok: false, status: 200, message: `${NOT_A_MODEL_LIST}. The base URL may point at a web page`, ms: Date.now() - t0 });
+    }
     const m = /^HTTP (\d{3}): ([\s\S]*)$/.exec(msg);
     return c.json({ ok: false, status: m ? Number(m[1]) : 0, message: m ? m[2] : msg, ms: Date.now() - t0 });
   }
