@@ -10,6 +10,8 @@
 //   node scripts/smoke-dashboard.mjs --skip-render    skip check 10 (no Chrome on this machine)
 //
 // Env: CHROME_BIN optionally points at a Chrome or Chromium binary for check 10.
+//      SMOKE_ALLOW_REUSE=1 lets the script use a Worker that is already running on the port. Without it the
+//      script refuses, because it creates and deletes data and that Worker may not be a disposable local one.
 // The script only ever talks to 127.0.0.1:8787 and never deploys anything.
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -101,7 +103,15 @@ async function healthy() {
 
 async function ensureServer() {
   if (await healthy()) {
-    console.log(`Using the Worker already running at ${BASE}`);
+    // The provider round trip always creates and deletes rows, and --check-mobile seeds and sweeps `audit-*`
+    // ones. A Worker this script did not start could be `wrangler dev --remote` on the production D1 (T-02-31),
+    // so reusing one needs an explicit opt-in.
+    if (process.env.SMOKE_ALLOW_REUSE !== '1') {
+      console.error(`FAIL a Worker is already answering at ${BASE}. This script creates and deletes data through its admin API.`);
+      console.error('     Stop it so the script starts a local one, or set SMOKE_ALLOW_REUSE=1 if it is a local, disposable Worker.');
+      process.exit(1);
+    }
+    console.log(`Using the Worker already running at ${BASE} (SMOKE_ALLOW_REUSE=1)`);
     return;
   }
   console.log('No Worker on 127.0.0.1:8787, applying local migrations and starting wrangler dev...');
@@ -436,23 +446,20 @@ async function withSeededData(cookie, fn) {
     info('mobile audit seeded', `provider, route, gateway key, rule and a failed request (proxy status ${proxied.status})`);
     return await fn();
   } finally {
+    // Only what this run seeded: the provider and route by the ids captured above, the gateway key by name on that
+    // route, and the rule by its audit note (the Worker returns no id for a new rule).
     const rules = await adminCall(cookie, 'GET', '/rules');
     for (const r of rules.data?.rules ?? []) if (r.note === 'audit') await adminCall(cookie, 'DELETE', `/rules/${r.id}`);
-    const keys = await adminCall(cookie, 'GET', '/gateway-keys');
-    for (const k of keys.data?.keys ?? []) if (k.name === 'audit-key') await adminCall(cookie, 'DELETE', `/gateway-keys/${k.id}`);
-    const routes = await adminCall(cookie, 'GET', '/routes');
-    for (const r of routes.data?.routes ?? []) if (r.name === 'audit-route') await adminCall(cookie, 'DELETE', `/routes/${r.id}`);
-    const providers = await adminCall(cookie, 'GET', '/providers');
-    for (const p of providers.data?.providers ?? []) if (p.name === 'audit-provider') await adminCall(cookie, 'DELETE', `/providers/${p.id}`);
+    if (created.route !== null) {
+      const keys = await adminCall(cookie, 'GET', '/gateway-keys');
+      for (const k of keys.data?.keys ?? []) if (k.name === 'audit-key' && k.route_id === created.route) await adminCall(cookie, 'DELETE', `/gateway-keys/${k.id}`);
+      await adminCall(cookie, 'DELETE', `/routes/${created.route}`);
+    }
+    if (created.provider !== null) await adminCall(cookie, 'DELETE', `/providers/${created.provider}`);
   }
 }
 
 async function checkMobile(cookie) {
-  // The audit seeds and deletes data: it only ever runs against the local dev Worker (T-02-31).
-  if (BASE !== 'http://127.0.0.1:8787') {
-    console.error(`FAIL --check-mobile refuses to run against ${BASE}`);
-    process.exit(1);
-  }
   const chrome = findChrome();
   if (!chrome) {
     report(false, 'mobile audit: headless Chromium', 'no Chrome found; set CHROME_BIN');
