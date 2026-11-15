@@ -8,6 +8,7 @@ import {
   settingsToForm,
   validateRuleForm,
   validateSettings,
+  validateTester,
   type RuleForm,
 } from '../src/dashboard/lib/rule-form';
 
@@ -165,5 +166,15 @@ describe('buildTesterPayload', () => {
   it('sends a provider scope, the Retry-After text and the body as typed', () => {
     const p = buildTesterPayload({ provider_id: '4', status: '402', retry_after: '30', body: '' });
     expect(j(p)).toBe(j({ provider_id: 4, status: 402, retry_after: '30', body: '' }));
+  });
+});
+
+describe('validateTester', () => {
+  it('accepts integer HTTP statuses from 100 to 599 and rejects blank, non-numeric or out-of-range values', () => {
+    expect(validateTester({ provider_id: '', status: '100', retry_after: '', body: '' }).status).toBeUndefined();
+    expect(validateTester({ provider_id: '', status: '599', retry_after: '', body: '' }).status).toBeUndefined();
+    for (const bad of ['', '  ', '4O3', '99', '600', '429.5']) {
+      expect(validateTester({ provider_id: '', status: bad, retry_after: '', body: '' }).status).toBe('Enter a status from 100 to 599.');
+    }
   });
 });

@@ -139,3 +139,8 @@ export function buildTesterPayload(form: TesterForm): Record<string, unknown> {
     body: form.body,
   };
 }
+
+/** Strict 3-digit HTTP status validation so blank or non-numeric input cannot silently fall back to 200. */
+export function validateTester(form: TesterForm): { status?: string } {
+  return wholeInRange(form.status, 100, 599) ? {} : { status: 'Enter a status from 100 to 599.' };
+}

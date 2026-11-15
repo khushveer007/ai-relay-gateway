@@ -4,11 +4,11 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Input } from '@/components/ui/input';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { Textarea } from '@/components/ui/textarea';
-import { Field } from '@/components/field';
+import { Field, fieldMessageId } from '@/components/field';
 import { ActionBadge } from '@/components/status-badge';
 import { useRuleTest } from '@/hooks/use-settings';
 import type { ProviderDTO } from '@/lib/api';
-import { buildTesterPayload, type TesterForm } from '@/lib/rule-form';
+import { buildTesterPayload, validateTester, type TesterForm } from '@/lib/rule-form';
 
 const SAMPLE_BODY = '{"error":{"message":"You exceeded your current quota, please check your plan and billing details."}}';
 
@@ -18,8 +18,11 @@ const SAMPLE_BODY = '{"error":{"message":"You exceeded your current quota, pleas
  */
 export function RuleTester({ providers }: { providers: ProviderDTO[] }) {
   const [form, setForm] = useState<TesterForm>({ provider_id: '', status: '429', retry_after: '', body: SAMPLE_BODY });
+  const [attempted, setAttempted] = useState(false);
   const test = useRuleTest();
   const set = (changes: Partial<TesterForm>) => setForm((f) => ({ ...f, ...changes }));
+  const statusError = validateTester(form).status;
+  const shownStatus = attempted ? statusError : undefined;
 
   return (
     <Card>
@@ -29,10 +32,17 @@ export function RuleTester({ providers }: { providers: ProviderDTO[] }) {
       </CardHeader>
       <CardContent>
         <form
+          noValidate
           className="flex flex-col gap-4"
           onSubmit={(e) => {
             e.preventDefault();
-            if (!test.isPending) test.mutate(buildTesterPayload(form));
+            if (test.isPending) return;
+            if (statusError) {
+              setAttempted(true);
+              document.getElementById('tester-status')?.focus();
+              return;
+            }
+            test.mutate(buildTesterPayload(form));
           }}
         >
           <Field label="Scope" htmlFor="tester-scope">
@@ -46,8 +56,16 @@ export function RuleTester({ providers }: { providers: ProviderDTO[] }) {
             </NativeSelect>
           </Field>
           <div className="grid gap-4 sm:grid-cols-2">
-            <Field label="HTTP status" htmlFor="tester-status">
-              <Input id="tester-status" inputMode="numeric" autoComplete="off" value={form.status} onChange={(e) => set({ status: e.target.value })} />
+            <Field label="HTTP status" htmlFor="tester-status" error={shownStatus}>
+              <Input
+                id="tester-status"
+                inputMode="numeric"
+                autoComplete="off"
+                value={form.status}
+                aria-invalid={shownStatus ? true : undefined}
+                aria-describedby={shownStatus ? fieldMessageId('tester-status') : undefined}
+                onChange={(e) => set({ status: e.target.value })}
+              />
             </Field>
             <Field label="Retry-After" htmlFor="tester-retry">
               <Input
