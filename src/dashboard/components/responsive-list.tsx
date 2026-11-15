@@ -32,8 +32,13 @@ type ResponsiveListProps<T> = {
   ariaLabel: string;
 };
 
-/** A cell that shows an ellipsis when too long and reveals the full value on hover or long-press. */
+/**
+ * A cell that shows an ellipsis when too long and reveals the full value on hover. Below 768px
+ * (card mode) it wraps instead: a phone cannot hover a title, so the text must stay readable.
+ */
 export function TruncatedText({ text, className }: { text: string; className?: string }) {
+  const isDesktop = useIsDesktop();
+  if (!isDesktop) return <span className={cn('block break-words', className)}>{text}</span>;
   return (
     <span className={cn('block truncate', className)} title={text}>
       {text}
@@ -139,12 +144,12 @@ export function ResponsiveList<T>({
           ))
         : rows.map((row) => (
             <Card key={getRowKey(row)} className="p-4" role="listitem">
-              {titleCol ? <div className="min-w-0 text-sm font-semibold">{titleCol.cell(row)}</div> : null}
+              {titleCol ? <div className="min-w-0 text-sm font-semibold break-words">{titleCol.cell(row)}</div> : null}
               <dl className="flex flex-col gap-2">
                 {detailCols.map((col) => (
                   <div key={col.key} className="flex flex-col gap-0.5">
                     <dt className="text-xs font-semibold text-muted-foreground">{mobileLabelOf(col)}</dt>
-                    <dd className="min-w-0 text-sm">{col.cell(row)}</dd>
+                    <dd className="min-w-0 text-sm break-words">{col.cell(row)}</dd>
                   </div>
                 ))}
               </dl>

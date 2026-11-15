@@ -48,7 +48,10 @@ export function fmtMs(v: number | null | undefined): string {
   return `${v} ms`;
 }
 
-// RED stub: the real helper arrives in the GREEN commit.
-export function actionLabel(_action: string): string {
-  return '';
+/**
+ * The one place that names a rule or attempt action for the operator. The action badge and every
+ * later place that shows an action call it, so Phase 3 (DROP-08) changes only this function (D-28).
+ */
+export function actionLabel(action: string): string {
+  return action;
 }

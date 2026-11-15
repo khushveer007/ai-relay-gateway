@@ -28,6 +28,9 @@
   --status-warn: hsl(38 92% 54%);
   --status-danger: hsl(350 90% 68%);
   --status-neutral: hsl(220 14% 58%);
+  /* Overview chart: OK bars run from -to (top) to -from (bottom). Same values as the former hex #6e36f2 and #8a5cf5. */
+  --chart-ok-from: hsl(258 88% 66%);
+  --chart-ok-to: hsl(258 88% 58%);
   --radius: 0.625rem;
 }
 
@@ -48,6 +51,7 @@
   --color-accent-foreground: var(--accent-foreground);
   --color-destructive: var(--destructive);
   --color-border: var(--border);
+  --color-border-subtle: var(--border-subtle);
   --color-input: var(--input);
   --color-ring: var(--ring);
   --color-cyan: var(--cyan);

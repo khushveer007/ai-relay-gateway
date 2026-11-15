@@ -1,5 +1,15 @@
 import { queryOptions } from '@tanstack/react-query';
-import { api, ApiError, type ProviderDTO, type StatsDTO } from '@/lib/api';
+import {
+  api,
+  ApiError,
+  type Action,
+  type ErrorRuleDTO,
+  type GatewayKeyDTO,
+  type ProviderDTO,
+  type RouteDTO,
+  type SettingsDTO,
+  type StatsDTO,
+} from '@/lib/api';
 import type { Range } from '@/lib/overview';
 
 export type StatsRange = Range;
@@ -39,6 +49,37 @@ export const statsQuery = (range: StatsRange) =>
 export const providersQuery = queryOptions({
   queryKey: ['providers'],
   queryFn: () => api.get<{ providers: ProviderDTO[] }>('/providers'),
+  staleTime: 15_000,
+  refetchOnWindowFocus: true,
+});
+
+// The reads below share providersQuery's settings (D-30): focus refetch on, staleTime 15 s, and no
+// timer-driven refetch anywhere. The Worker runs a config batch per read (they are not cached
+// server-side), so focus refetch stays only because it is cheap for one operator.
+export const routesQuery = queryOptions({
+  queryKey: ['routes'],
+  queryFn: () => api.get<{ routes: RouteDTO[] }>('/routes'),
+  staleTime: 15_000,
+  refetchOnWindowFocus: true,
+});
+
+export const gatewayKeysQuery = queryOptions({
+  queryKey: ['gateway-keys'],
+  queryFn: () => api.get<{ keys: GatewayKeyDTO[] }>('/gateway-keys'),
+  staleTime: 15_000,
+  refetchOnWindowFocus: true,
+});
+
+export const rulesQuery = queryOptions({
+  queryKey: ['rules'],
+  queryFn: () => api.get<{ rules: ErrorRuleDTO[]; actions: Action[] }>('/rules'),
+  staleTime: 15_000,
+  refetchOnWindowFocus: true,
+});
+
+export const settingsQuery = queryOptions({
+  queryKey: ['settings'],
+  queryFn: () => api.get<SettingsDTO>('/settings'),
   staleTime: 15_000,
   refetchOnWindowFocus: true,
 });

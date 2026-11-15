@@ -8,7 +8,7 @@ import { alignSeries, fillSeries, type Range, type SeriesPoint } from '@/lib/ove
 import type { StatsDTO } from '@/lib/api';
 
 const CHART_CONFIG: ChartConfig = {
-  ok: { label: 'OK', color: '#8a5cf5' },
+  ok: { label: 'OK', color: 'var(--chart-ok-from)' },
   errors: { label: 'Errors', color: 'var(--status-danger)' },
 };
 
@@ -69,8 +69,8 @@ export function TrafficChart({ range, stats, isLoading, isFailed }: TrafficChart
             <BarChart data={data}>
               <defs>
                 <linearGradient id="trafficOkGradient" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="#6e36f2" />
-                  <stop offset="100%" stopColor="#8a5cf5" />
+                  <stop offset="0%" style={{ stopColor: 'var(--chart-ok-to)' }} />
+                  <stop offset="100%" style={{ stopColor: 'var(--chart-ok-from)' }} />
                 </linearGradient>
               </defs>
               <CartesianGrid vertical={false} />
@@ -91,7 +91,7 @@ export function TrafficChart({ range, stats, isLoading, isFailed }: TrafficChart
                 }
               />
               <Bar dataKey="ok" stackId="traffic" fill="url(#trafficOkGradient)" maxBarSize={32} />
-              <Bar dataKey="errors" stackId="traffic" fill="var(--color-status-danger)" maxBarSize={32} />
+              <Bar dataKey="errors" stackId="traffic" fill="var(--status-danger)" maxBarSize={32} />
             </BarChart>
           </ChartContainer>
         )}

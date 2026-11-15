@@ -1,5 +1,6 @@
 import { Badge } from '@/components/ui/badge';
 import type { Action, KeyStatus } from '@/lib/api';
+import { actionLabel } from '@/lib/format';
 import { cn } from '@/lib/utils';
 
 type Tone = 'ok' | 'warn' | 'danger' | 'neutral';
@@ -44,5 +45,5 @@ const ACTION_TONE: Record<string, Tone> = {
 /** Outcome pill for an upstream attempt action: OK, RATE_LIMITED, EXHAUSTED, INVALID_KEY, etc. */
 export function ActionBadge({ action }: { action: Action | 'OK' | string }) {
   const tone = ACTION_TONE[action] ?? 'neutral';
-  return <Badge variant="outline" className={cn('border-transparent', TONE_CLASS[tone])}>{action}</Badge>;
+  return <Badge variant="outline" className={cn('border-transparent', TONE_CLASS[tone])}>{actionLabel(action)}</Badge>;
 }
