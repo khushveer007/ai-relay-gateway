@@ -94,17 +94,22 @@ function strMap(v: unknown, field: string): Record<string, string> {
   return out;
 }
 
-function providerColumns(b: Record<string, any>, existing?: Provider) {
-  const pick = <K extends keyof Provider>(k: K): unknown => (b[k] !== undefined ? b[k] : existing?.[k]);
-
-  const name = str(pick('name'), 'name', { required: true, max: 80 })!;
-  const base_url = str(pick('base_url'), 'base_url', { required: true, max: 300 })!;
+/** Checks that a base URL is a valid http(s) URL and returns it with trailing slashes stripped. */
+function validBaseUrl(raw: string): string {
   try {
-    const u = new URL(base_url);
+    const u = new URL(raw);
     if (u.protocol !== 'https:' && u.protocol !== 'http:') throw new Error();
   } catch {
     throw bad('base_url must be a valid http(s) URL');
   }
+  return raw.replace(/\/+$/, '');
+}
+
+function providerColumns(b: Record<string, any>, existing?: Provider) {
+  const pick = <K extends keyof Provider>(k: K): unknown => (b[k] !== undefined ? b[k] : existing?.[k]);
+
+  const name = str(pick('name'), 'name', { required: true, max: 80 })!;
+  const base_url = validBaseUrl(str(pick('base_url'), 'base_url', { required: true, max: 300 })!);
   const formats = (pick('formats') as unknown[] | undefined) ?? ALL_FORMATS;
   if (!Array.isArray(formats) || formats.length === 0 || !formats.every((f) => ALL_FORMATS.includes(f as any))) {
     throw bad(`formats must be a non-empty subset of ${ALL_FORMATS.join(', ')}`);
@@ -118,7 +123,7 @@ function providerColumns(b: Record<string, any>, existing?: Provider) {
 
   return {
     name,
-    base_url: base_url.replace(/\/+$/, ''),
+    base_url,
     formats: JSON.stringify([...new Set(formats)]),
     key_strategy,
     model_map: JSON.stringify(strMap(pick('model_map'), 'model_map')),
@@ -276,6 +281,36 @@ s.post('/providers', async (c) => {
     }
   }
   return c.json({ id, keys: keyResult, models, models_error: modelsError }, 201);
+});
+
+// Advice only (D-17, D-18): asks the relay for its model list and reports the outcome. It writes
+// nothing, leaves every key status alone, and answers with a count, never a key or the model list.
+s.post('/providers/test-connection', async (c) => {
+  const b = await body(c);
+  const base_url = validBaseUrl(str(b.base_url, 'base_url', { required: true, max: 300 })!);
+  const extra_headers = strMap(b.extra_headers, 'extra_headers');
+  let apiKey = splitKeys(b.keys)[0] ?? null;
+  if (!apiKey && b.provider_id !== undefined && b.provider_id !== null && b.provider_id !== '') {
+    const rows = await c.env.DB.prepare(
+      "SELECT * FROM provider_keys WHERE provider_id = ? ORDER BY (status = 'active') DESC, priority LIMIT 1",
+    )
+      .bind(idParam(String(b.provider_id)))
+      .all();
+    const row = rows.results[0];
+    // D-19: a stored key is decrypted here and never travels to the browser.
+    if (row) apiKey = await plainKey(c.env, parseKey(row));
+  }
+  if (!apiKey) throw bad('no key to test with');
+  const t0 = Date.now();
+  try {
+    const models = await fetchModels({ base_url, extra_headers }, apiKey);
+    return c.json({ ok: true, count: models.length, ms: Date.now() - t0 });
+  } catch (e) {
+    // The admin call itself worked, so answer 200 and let the client show the relay's verdict.
+    const msg = String((e as Error).message ?? e).split(apiKey).join('***').slice(0, 300);
+    const m = /^HTTP (\d{3}): ([\s\S]*)$/.exec(msg);
+    return c.json({ ok: false, status: m ? Number(m[1]) : 0, message: m ? m[2] : msg, ms: Date.now() - t0 });
+  }
 });
 
 s.put('/providers/:id', async (c) => {

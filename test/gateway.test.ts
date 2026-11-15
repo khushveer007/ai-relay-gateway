@@ -7,6 +7,7 @@ import { detectFormat, extractModel, looksLikeJsonError, replaceModel } from '..
 import { handleModels, handleProxy } from '../src/worker/proxy/forward';
 import { peekStream } from '../src/worker/proxy/stream-peek';
 import { UsageTap } from '../src/worker/proxy/usage';
+import { buildProviderPayload, emptyProviderForm } from '../src/dashboard/lib/provider-form';
 import { classify } from '../src/worker/routing/error-rules';
 import { globMatch, mapModel, supportsModel } from '../src/worker/routing/model-map';
 import { resolveRoute } from '../src/worker/routing/resolve-route';
@@ -284,12 +285,14 @@ describe('Full Proxy Failover & Admin Integration', () => {
   let mockSettings: Record<string, unknown>[];
   let insertedLogs: unknown[][];
   let keyUpdates: Array<{ id: number; status: string; reason: string | null }>;
+  let providerInserts: unknown[][];
   let env: Env;
 
   beforeEach(async () => {
     invalidateConfig();
     insertedLogs = [];
     keyUpdates = [];
+    providerInserts = [];
 
     const k1Enc = await encrypt('sk-provA-key1', ENC_SECRET);
     const k2Enc = await encrypt('sk-provA-key2', ENC_SECRET);
@@ -387,6 +390,10 @@ describe('Full Proxy Failover & Admin Integration', () => {
             insertedLogs.push(bound);
           } else if (sql.includes('UPDATE provider_keys')) {
             keyUpdates.push({ id: Number(bound[5]), status: String(bound[0]), reason: bound[1] as string | null });
+          } else if (sql.startsWith('INSERT INTO providers')) {
+            // The create handler reads res.results[0].id from RETURNING id.
+            providerInserts.push(bound);
+            return { results: [{ id: 3 }], success: true, meta: { changes: 1 } };
           }
           return { results: [], success: true, meta: { changes: 1 } };
         },
@@ -625,5 +632,52 @@ describe('Full Proxy Failover & Admin Integration', () => {
       makeCtx().ctx,
     );
     expect(csrfBlocked.status).toBe(415);
+  });
+  async function adminCookie(): Promise<string> {
+    const res = await worker.fetch(
+      new Request('https://gw.test/api/admin/login', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ password: ADMIN_PW }),
+      }),
+      env,
+      makeCtx().ctx,
+    );
+    return res.headers.get('set-cookie')!.split(';')[0];
+  }
+
+  async function adminPost(cookie: string, path: string, payload: unknown): Promise<Response> {
+    return await worker.fetch(
+      new Request(`https://gw.test/api/admin${path}`, {
+        method: 'POST',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify(payload),
+      }),
+      env,
+      makeCtx().ctx,
+    );
+  }
+
+  it('add-provider tracer: Test connection, then create with the form payload (PRV-01, PRV-04)', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      async () =>
+        new Response('{"data":[{"id":"m1"},{"id":"m2"}]}', { status: 200, headers: { 'content-type': 'application/json' } }),
+    );
+    const cookie = await adminCookie();
+
+    const tested = await adminPost(cookie, '/providers/test-connection', { base_url: 'https://new-relay.test/', keys: 'sk-new-1' });
+    expect(tested.status).toBe(200);
+    const testedJson = (await tested.json()) as { ok: boolean; count: number };
+    expect(testedJson).toMatchObject({ ok: true, count: 2 });
+    expect(String(fetchMock.mock.calls[0][0])).toMatch(/^https:\/\/new-relay\.test\/v1\/models/);
+
+    const form = { ...emptyProviderForm(), name: 'New Relay', base_url: 'https://new-relay.test/', keys: 'sk-new-1' };
+    const created = await adminPost(cookie, '/providers', buildProviderPayload(form, 'create'));
+    expect(created.status).toBe(201);
+    expect(providerInserts).toHaveLength(1);
+    const bound = providerInserts[0];
+    expect(bound).toContain('https://new-relay.test');
+    expect(bound).not.toContain('https://new-relay.test/');
+    expect(bound).toContain('["anthropic","openai-chat","openai-responses"]');
   });
 });
