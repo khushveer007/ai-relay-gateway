@@ -12,6 +12,8 @@ import { activeFilterCount, clearLogFilters } from '@/lib/logs-filters';
 import { gatewayKeysQuery, providersQuery, routesQuery } from '@/lib/queries';
 import { cn } from '@/lib/utils';
 import { buildLogLabels, logColumns, logRowLabel } from './logs/log-columns';
+import { LogDetailDialog } from './logs/log-detail-dialog';
+import { LogFiltersBar } from './logs/log-filters-bar';
 
 const LOAD_MESSAGE = 'Failed to load logs. Check your connection and try again.';
 
@@ -24,8 +26,7 @@ export default function LogsView() {
   const providersQ = useQuery(providersQuery);
   const gatewayKeysQ = useQuery(gatewayKeysQuery);
   const routesQ = useQuery(routesQuery);
-  // Wired to the detail dialog in the next task.
-  const [, setSelected] = useState<LogRowDTO | null>(null);
+  const [selected, setSelected] = useState<LogRowDTO | null>(null);
   useLoadErrorToast(q, 'logs-load', LOAD_MESSAGE);
 
   const labels = useMemo(
@@ -102,7 +103,12 @@ export default function LogsView() {
           </Button>
         }
       />
+      <LogFiltersBar providers={providersQ.data?.providers ?? []} gatewayKeys={gatewayKeysQ.data?.keys ?? []} />
       {body}
+      {/* Mounted only while open, so each request opens at the top of its own trail. */}
+      {selected ? (
+        <LogDetailDialog log={selected} labels={labels} open onOpenChange={(open) => !open && setSelected(null)} />
+      ) : null}
     </div>
   );
 }
