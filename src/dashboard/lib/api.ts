@@ -178,25 +178,42 @@ export function setUnauthorizedHandler(fn: () => void): void {
 }
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const init: RequestInit = {
-    method,
-    credentials: 'same-origin',
-  };
+  // Cast: the Worker tsconfig type-checks this file through the tests and its fetch types lack `credentials`.
+  const init = { method, credentials: 'same-origin' } as RequestInit;
   // The admin CSRF guard needs a JSON content-type on every non-GET and non-HEAD call.
   if (method !== 'GET' && method !== 'HEAD') {
     init.headers = { 'content-type': 'application/json' };
     init.body = JSON.stringify(body ?? {});
   }
   const res = await fetch(`/api/admin${path}`, init);
-  const data = (await res.json().catch(() => ({}))) as { error?: string };
+  // Read the body once; an empty string means "no body", anything else must parse as JSON.
+  const text = await res.text();
+  let data: unknown;
+  let parsed = false;
+  if (text.trim()) {
+    try {
+      data = JSON.parse(text);
+      parsed = true;
+    } catch {
+      /* leave parsed false: handled per status below */
+    }
+  }
+  const errorText =
+    parsed && data && typeof data === 'object' && typeof (data as { error?: unknown }).error === 'string'
+      ? (data as { error: string }).error
+      : '';
   if (res.status === 401 && path !== '/login') {
     // The boot probe's 401 is normal (nobody is signed in yet), so it never fires the handler.
     if (path !== '/session') onUnauthorized?.();
-    throw new ApiError(401, data.error || 'Session expired');
+    throw new ApiError(401, errorText || 'Session expired');
   }
   if (!res.ok) {
-    throw new ApiError(res.status, data.error || `HTTP ${res.status}`);
+    throw new ApiError(res.status, errorText || `HTTP ${res.status}`);
   }
+  // Only a 204 may be empty. A 2xx the Worker did not answer in JSON (an HTML fallback, a proxy page)
+  // must never pass as an empty object, or a failed mutation would look like a success (WR-06, D-34).
+  if (res.status === 204) return (parsed ? data : {}) as T;
+  if (!parsed) throw new ApiError(res.status, 'Invalid response from the gateway.');
   return data as T;
 }
 

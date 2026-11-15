@@ -10,7 +10,10 @@ export const sessionQuery = queryOptions({
   queryKey: ['session'],
   queryFn: async (): Promise<boolean> => {
     try {
-      await api.get('/session');
+      // Only the Worker's own { ok: true } answer counts; any other 200 (an HTML fallback, a proxy
+      // page) fails the probe instead of signing in (T-02-10).
+      const res = await api.get<{ ok?: boolean } | null>('/session');
+      if (res?.ok !== true) throw new Error('Unexpected session response');
       return true;
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) return false;
