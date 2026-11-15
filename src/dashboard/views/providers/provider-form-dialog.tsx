@@ -2,6 +2,7 @@ import { useReducer, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { ChevronDown, CircleAlert, CircleCheck } from 'lucide-react';
 import { toast } from 'sonner';
+import { FormError } from '@/components/form-error';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
@@ -202,11 +203,7 @@ export function ProviderFormDialog({ open, onOpenChange, mode, provider }: Provi
       }
     >
       <div className="flex flex-col gap-4">
-        {serverError || localError ? (
-          <div role="alert" className="rounded-lg border border-destructive/40 bg-destructive/10 p-3 text-sm break-words text-destructive">
-            {serverError ?? localError}
-          </div>
-        ) : null}
+        <FormError message={serverError ?? localError} />
 
         <div className="grid gap-4 md:grid-cols-2">
           <Field label="Name" htmlFor={NAME_ID} error={shown.name}>

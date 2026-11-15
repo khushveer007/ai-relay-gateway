@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
+import { FormError } from '@/components/form-error';
 import { Input } from '@/components/ui/input';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { Switch } from '@/components/ui/switch';
@@ -86,11 +87,7 @@ export function RuleDialog({ open, onOpenChange, mode, rule, providers, actions 
       }
     >
       <div className="flex flex-col gap-4">
-        {save.isError ? (
-          <div role="alert" className="rounded-lg border border-destructive/40 bg-destructive/10 p-3 text-sm break-words text-destructive">
-            {save.error.message}
-          </div>
-        ) : null}
+        <FormError message={save.isError ? save.error.message : null} />
 
         <div className="grid gap-4 md:grid-cols-2">
           <Field label="Scope" htmlFor={ID.scope}>

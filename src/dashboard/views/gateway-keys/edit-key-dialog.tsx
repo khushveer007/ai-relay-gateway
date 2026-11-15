@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
+import { FormError } from '@/components/form-error';
 import { Input } from '@/components/ui/input';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { Field, fieldMessageId } from '@/components/field';
@@ -61,11 +62,7 @@ export function EditKeyDialog({ open, onOpenChange, gatewayKey, routes }: EditKe
       }
     >
       <div className="flex flex-col gap-4">
-        {save.isError ? (
-          <div role="alert" className="rounded-lg border border-destructive/40 bg-destructive/10 p-3 text-sm break-words text-destructive">
-            {save.error.message}
-          </div>
-        ) : null}
+        <FormError message={save.isError ? save.error.message : null} />
         <Field label="Name" htmlFor={NAME_ID} error={attempted ? nameError : undefined}>
           <Input
             id={NAME_ID}
