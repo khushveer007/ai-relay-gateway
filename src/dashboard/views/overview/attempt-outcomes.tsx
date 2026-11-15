@@ -11,6 +11,8 @@ interface AttemptOutcomesProps {
   range: Range;
   rows: readonly ActionRow[];
   isLoading: boolean;
+  /** True when /stats failed: the empty message says so instead of claiming there were no attempts. */
+  failed?: boolean;
 }
 
 const columns: ResponsiveColumn<ActionRow>[] = [
@@ -29,7 +31,7 @@ const columns: ResponsiveColumn<ActionRow>[] = [
 ];
 
 /** Classification of upstream attempts. Failure is owned by the Overview error panel (rows arrive empty). */
-export function AttemptOutcomes({ range, rows, isLoading }: AttemptOutcomesProps) {
+export function AttemptOutcomes({ range, rows, isLoading, failed = false }: AttemptOutcomesProps) {
   return (
     <Card>
       <CardHeader>
@@ -43,7 +45,7 @@ export function AttemptOutcomes({ range, rows, isLoading }: AttemptOutcomesProps
           getRowKey={(row) => row.action}
           ariaLabel="Attempt outcomes"
           isLoading={isLoading}
-          emptyMessage="No upstream attempts recorded in this window."
+          emptyMessage={failed ? 'Unavailable — see the error above.' : 'No upstream attempts recorded in this window.'}
         />
       </CardContent>
     </Card>

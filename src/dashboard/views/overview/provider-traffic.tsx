@@ -9,10 +9,11 @@ interface ProviderTrafficProps {
   rows: readonly ProviderRow[];
   providers: readonly ProviderDTO[] | undefined;
   isLoading: boolean;
+  failed?: boolean;
 }
 
 /** Traffic by provider. Names come from /providers, falling back to `#{id}` when one is missing. */
-export function ProviderTraffic({ rows, providers, isLoading }: ProviderTrafficProps) {
+export function ProviderTraffic({ rows, providers, isLoading, failed = false }: ProviderTrafficProps) {
   const names = new Map((providers ?? []).map((p) => [p.id, p.name]));
 
   const columns: ResponsiveColumn<ProviderRow>[] = [
@@ -60,7 +61,7 @@ export function ProviderTraffic({ rows, providers, isLoading }: ProviderTrafficP
           getRowKey={(row) => row.provider_id}
           ariaLabel="Traffic by provider"
           isLoading={isLoading}
-          emptyMessage="No provider traffic in this window."
+          emptyMessage={failed ? 'Unavailable — see the error above.' : 'No provider traffic in this window.'}
         />
       </CardContent>
     </Card>

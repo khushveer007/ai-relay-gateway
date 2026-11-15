@@ -8,6 +8,7 @@ type ModelRow = StatsDTO['by_model'][number];
 interface TopModelsProps {
   rows: readonly ModelRow[];
   isLoading: boolean;
+  failed?: boolean;
 }
 
 const columns: ResponsiveColumn<ModelRow>[] = [
@@ -35,7 +36,7 @@ const columns: ResponsiveColumn<ModelRow>[] = [
 ];
 
 /** Top models in the API's request-count order (no client sorting). */
-export function TopModels({ rows, isLoading }: TopModelsProps) {
+export function TopModels({ rows, isLoading, failed = false }: TopModelsProps) {
   return (
     <Card>
       <CardHeader>
@@ -48,7 +49,7 @@ export function TopModels({ rows, isLoading }: TopModelsProps) {
           getRowKey={(row) => row.model}
           ariaLabel="Top models"
           isLoading={isLoading}
-          emptyMessage="No model traffic in this window."
+          emptyMessage={failed ? 'Unavailable — see the error above.' : 'No model traffic in this window.'}
         />
       </CardContent>
     </Card>

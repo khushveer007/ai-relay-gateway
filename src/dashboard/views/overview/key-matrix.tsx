@@ -17,13 +17,17 @@ interface KeyMatrixProps {
   providers: ProviderDTO[] | undefined;
   stats: StatsDTO | undefined;
   isLoading: boolean;
+  /** /providers failed: no rows, and the empty message must not send the operator to add a provider. */
+  providersFailed?: boolean;
+  /** /stats failed: Reqs and Last Used show an em dash instead of 0 and never. */
+  statsFailed?: boolean;
 }
 
 /**
  * Key Health Matrix: every upstream key across every provider, on ResponsiveList. Only `key_hint`
  * (never the encrypted or a plaintext key) is ever rendered (T-01-19).
  */
-export function KeyMatrix({ range, providers, stats, isLoading }: KeyMatrixProps) {
+export function KeyMatrix({ range, providers, stats, isLoading, providersFailed = false, statsFailed = false }: KeyMatrixProps) {
   const enableKey = useEnableKey();
   const testKey = useTestKey();
 
@@ -57,12 +61,12 @@ export function KeyMatrix({ range, providers, stats, isLoading }: KeyMatrixProps
     {
       key: 'reqs',
       header: `Reqs (${range})`,
-      cell: ({ key }) => <span className="font-mono">{fmtNum(usageMap.get(key.id)?.requests ?? 0)}</span>,
+      cell: ({ key }) => <span className="font-mono">{statsFailed ? '—' : fmtNum(usageMap.get(key.id)?.requests ?? 0)}</span>,
     },
     {
       key: 'last-used',
       header: 'Last Used',
-      cell: ({ key }) => fmtAgo(usageMap.get(key.id)?.last_used),
+      cell: ({ key }) => (statsFailed ? '—' : fmtAgo(usageMap.get(key.id)?.last_used)),
     },
     {
       key: 'detail',
@@ -87,7 +91,9 @@ export function KeyMatrix({ range, providers, stats, isLoading }: KeyMatrixProps
           ariaLabel="Key health matrix"
           actionsHeader="Quick Action"
           isLoading={isLoading}
-          emptyMessage="No API keys configured yet. Add your first provider in Providers & Keys."
+          emptyMessage={
+            providersFailed ? 'Unavailable — see the error above.' : 'No API keys configured yet. Add your first provider in Providers & Keys.'
+          }
           renderActions={(row) => {
             const enablePending = enableKey.isPending && enableKey.variables === row.key.id;
             const testPending = testKey.isPending && testKey.variables === row.key.id;
