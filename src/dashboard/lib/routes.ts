@@ -20,3 +20,10 @@ export function parseHash(hash: string): ViewId {
   const id = hash.replace(/^#\/?/, '');
   return (VIEW_IDS as readonly string[]).includes(id) ? (id as ViewId) : 'overview';
 }
+
+// RED stubs: the real slot lists arrive in the GREEN commit.
+export const BOTTOM_VIEW_IDS: readonly ViewId[] = [];
+export const MORE_VIEW_IDS: readonly ViewId[] = [];
+export function isMoreActive(_view: ViewId): boolean {
+  return false;
+}
