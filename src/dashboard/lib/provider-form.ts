@@ -147,3 +147,32 @@ export function buildProviderPayload(form: ProviderForm, mode: FormMode): Record
   }
   return payload;
 }
+
+// RED stubs: the real validation and reducer arrive in the GREEN commit.
+export type FormErrors = Partial<Record<'name' | 'base_url', string>>;
+
+export function validateProviderForm(_form: ProviderForm, _mode: FormMode): FormErrors {
+  return { name: 'stub' };
+}
+
+export interface TestResult {
+  ok: boolean;
+  count?: number;
+  status?: number;
+  message?: string;
+  ms: number;
+}
+
+export interface TestState {
+  id: number;
+  status: 'idle' | 'running' | 'done';
+  result: TestResult | null;
+}
+
+export type TestAction = { type: 'start'; id: number } | { type: 'settle'; id: number; result: TestResult } | { type: 'reset' };
+
+export const initialTestState: TestState = { id: 0, status: 'idle', result: null };
+
+export function testReducer(state: TestState, _action: TestAction): TestState {
+  return state;
+}
