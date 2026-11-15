@@ -13,7 +13,7 @@ import { RouteDialog } from './route-dialog';
 const PATTERN_BADGE = 'h-auto whitespace-normal break-all text-left font-mono';
 
 /** One route: name, badge, patterns and its provider chain with each provider's active-key count. */
-export function RouteCard({ route, providers }: { route: RouteDTO; providers: ProviderDTO[] }) {
+export function RouteCard({ route, providers }: { route: RouteDTO; providers?: ProviderDTO[] }) {
   const del = useDeleteRoute(route.id);
   const [dialog, setDialog] = useState<'edit' | 'delete' | null>(null);
 
@@ -49,7 +49,7 @@ export function RouteCard({ route, providers }: { route: RouteDTO; providers: Pr
       ) : (
         <ol className="flex flex-col gap-1 md:flex-row md:flex-wrap md:items-center md:gap-2">
           {route.provider_ids.map((id, i) => {
-            const provider = providers.find((p) => p.id === id);
+            const provider = providers?.find((p) => p.id === id);
             const active = provider ? provider.keys.filter((k) => k.status === 'active').length : 0;
             const last = i === route.provider_ids.length - 1;
             return (

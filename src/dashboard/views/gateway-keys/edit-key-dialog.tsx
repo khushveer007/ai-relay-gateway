@@ -12,7 +12,7 @@ interface EditKeyDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   gatewayKey: GatewayKeyDTO;
-  routes: RouteDTO[];
+  routes?: RouteDTO[];
 }
 
 const NAME_ID = 'gateway-key-name';
@@ -74,15 +74,30 @@ export function EditKeyDialog({ open, onOpenChange, gatewayKey, routes }: EditKe
             onChange={(e) => setName(e.target.value)}
           />
         </Field>
-        <Field label="Route" htmlFor={ROUTE_ID}>
-          <NativeSelect id={ROUTE_ID} value={routeId} onChange={(e) => setRouteId(e.target.value)}>
-            <NativeSelectOption value="">Auto (match by model, then default)</NativeSelectOption>
-            {routes.map((r) => (
-              <NativeSelectOption key={r.id} value={String(r.id)}>
-                {r.is_default ? `${r.name} (default)` : r.name}
+        <Field
+          label="Route"
+          htmlFor={ROUTE_ID}
+          helper={routes ? undefined : 'Routes could not be loaded; route assignment is locked.'}
+        >
+          {routes ? (
+            <NativeSelect id={ROUTE_ID} value={routeId} disabled={pending} onChange={(e) => setRouteId(e.target.value)}>
+              <NativeSelectOption value="">Auto (match by model, then default)</NativeSelectOption>
+              {routeId !== '' && !routes.some((r) => String(r.id) === routeId) ? (
+                <NativeSelectOption value={routeId}>{`Route #${routeId}`}</NativeSelectOption>
+              ) : null}
+              {routes.map((r) => (
+                <NativeSelectOption key={r.id} value={String(r.id)}>
+                  {r.is_default ? `${r.name} (default)` : r.name}
+                </NativeSelectOption>
+              ))}
+            </NativeSelect>
+          ) : (
+            <NativeSelect id={ROUTE_ID} value={routeId} disabled>
+              <NativeSelectOption value={routeId}>
+                {gatewayKey.route_id === null ? 'Auto (match by model, then default)' : `Route #${gatewayKey.route_id} (unavailable)`}
               </NativeSelectOption>
-            ))}
-          </NativeSelect>
+            </NativeSelect>
+          )}
         </Field>
       </div>
     </ResponsiveDialog>

@@ -26,7 +26,7 @@ interface RouteDialogProps {
   onOpenChange: (open: boolean) => void;
   mode: 'create' | 'edit';
   route?: RouteDTO;
-  providers: ProviderDTO[];
+  providers?: ProviderDTO[];
 }
 
 const NAME_ID = 'route-name';
@@ -42,7 +42,8 @@ const ADD_ID = 'route-chain-add';
 export function RouteDialog({ open, onOpenChange, mode, route, providers }: RouteDialogProps) {
   const editing = mode === 'edit' && route !== undefined;
   const isDefault = editing && route.is_default;
-  const [form, setForm] = useState<RouteForm>(() => (editing ? routeToForm(route) : emptyRouteForm(providers)));
+  const providerList = providers ?? [];
+  const [form, setForm] = useState<RouteForm>(() => (editing ? routeToForm(route) : emptyRouteForm(providerList)));
   const [attempted, setAttempted] = useState(false);
   const save = useSaveRoute(editing ? route.id : undefined);
 
@@ -50,8 +51,8 @@ export function RouteDialog({ open, onOpenChange, mode, route, providers }: Rout
   const shown = attempted ? errors : {};
   const pending = save.isPending;
   const set = (changes: Partial<RouteForm>) => setForm((f) => ({ ...f, ...changes }));
-  const byId = (id: number) => providers.find((p) => p.id === id);
-  const remaining = availableProviders(providers, form.provider_ids);
+  const byId = (id: number) => providerList.find((p) => p.id === id);
+  const remaining = availableProviders(providerList, form.provider_ids);
 
   const submit = () => {
     if (pending) return;
@@ -207,7 +208,9 @@ export function RouteDialog({ open, onOpenChange, mode, route, providers }: Rout
             <p className="text-sm text-muted-foreground">No providers in this chain.</p>
           )}
 
-          {providers.length === 0 ? (
+          {providers === undefined ? (
+            <p className="text-sm text-muted-foreground">Providers could not be loaded. Refresh to add providers to this chain.</p>
+          ) : providers.length === 0 ? (
             <p className="text-sm text-muted-foreground">No providers yet. Add one on the Providers page.</p>
           ) : remaining.length > 0 ? (
             <NativeSelect

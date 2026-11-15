@@ -11,7 +11,7 @@ import { EditKeyDialog } from './edit-key-dialog';
 
 interface GatewayKeyCardProps {
   gatewayKey: GatewayKeyDTO;
-  routes: RouteDTO[];
+  routes?: RouteDTO[];
 }
 
 /** One client key: name, prefix, route, status and created time, with Enable or Disable, Edit and Delete in one wrapping row (D-25). */
@@ -20,7 +20,7 @@ export function GatewayKeyCard({ gatewayKey, routes }: GatewayKeyCardProps) {
   const del = useDeleteGatewayKey();
   const [dialog, setDialog] = useState<'edit' | 'delete' | null>(null);
 
-  const route = gatewayKey.route_id === null ? undefined : routes.find((r) => r.id === gatewayKey.route_id);
+  const route = gatewayKey.route_id === null ? undefined : routes?.find((r) => r.id === gatewayKey.route_id);
   const routeText = gatewayKey.route_id === null ? 'Auto' : route ? route.name : `#${gatewayKey.route_id}`;
 
   return (

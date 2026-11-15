@@ -36,9 +36,10 @@ export default function RoutesView() {
   const providersQ = useQuery(providersQuery);
   const [creating, setCreating] = useState(false);
   useLoadErrorToast(routesQ, 'routes-load', LOAD_MESSAGE);
+  useLoadErrorToast(providersQ, 'routes-providers-load', 'Failed to load providers for routes.');
 
   const routes = routesQ.data?.routes;
-  const providers = providersQ.data?.providers ?? [];
+  const providers = providersQ.data?.providers;
 
   let body;
   if (routesQ.isPending) {
@@ -53,6 +54,13 @@ export default function RoutesView() {
   } else {
     body = (
       <div className="flex flex-col gap-4">
+        {!providersQ.isPending && !providers ? (
+          <PageError
+            message="Failed to load providers. Provider names, key counts and New route are unavailable until providers load."
+            onRefresh={() => void providersQ.refetch()}
+            refreshing={providersQ.fetchStatus === 'fetching'}
+          />
+        ) : null}
         {routes.map((r) => (
           <RouteCard key={r.id} route={r} providers={providers} />
         ))}
@@ -66,7 +74,7 @@ export default function RoutesView() {
         title="Routes & Chains"
         subtitle="A request uses the route pinned to its gateway key, then the first route whose model pattern matches, then the default route."
         actions={
-          <Button className="h-11 md:h-9" onClick={() => setCreating(true)} disabled={!routes}>
+          <Button className="h-11 md:h-9" onClick={() => setCreating(true)} disabled={!routes || !providers}>
             <Plus aria-hidden="true" />
             New route
           </Button>
@@ -74,7 +82,7 @@ export default function RoutesView() {
       />
       {body}
       {/* Mounted only while open, so the form starts fresh each time. */}
-      {creating ? <RouteDialog open onOpenChange={setCreating} mode="create" providers={providers} /> : null}
+      {creating && providers ? <RouteDialog open onOpenChange={setCreating} mode="create" providers={providers} /> : null}
     </div>
   );
 }

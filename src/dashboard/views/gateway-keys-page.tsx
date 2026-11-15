@@ -39,9 +39,10 @@ export default function GatewayKeysView() {
   const [creating, setCreating] = useState(false);
   const revealed = useRevealedGatewayKey();
   useLoadErrorToast(keysQ, 'gateway-keys-load', LOAD_MESSAGE);
+  useLoadErrorToast(routesQ, 'gateway-keys-routes-load', 'Failed to load routes for Gateway Keys.');
 
   const keys = keysQ.data?.keys;
-  const routes = routesQ.data?.routes ?? [];
+  const routes = routesQ.data?.routes;
 
   let body;
   if (keysQ.isPending) {
@@ -58,7 +59,7 @@ export default function GatewayKeysView() {
       <Card className="items-center gap-3 p-8 text-center">
         <h2 className="text-sm font-semibold">No gateway keys yet</h2>
         <p className="max-w-md text-sm text-muted-foreground">Create a key, then use it in Claude Code, Codex or any SDK client.</p>
-        <Button onClick={() => setCreating(true)}>
+        <Button onClick={() => setCreating(true)} disabled={!routes}>
           <Plus aria-hidden="true" />
           Create key
         </Button>
@@ -67,6 +68,13 @@ export default function GatewayKeysView() {
   } else {
     body = (
       <div className="flex flex-col gap-4">
+        {!routesQ.isPending && !routes ? (
+          <PageError
+            message="Failed to load routes. Route names and Create key are unavailable until routes load."
+            onRefresh={() => void routesQ.refetch()}
+            refreshing={routesQ.fetchStatus === 'fetching'}
+          />
+        ) : null}
         <h2 className="text-sm font-semibold">
           {keys.length} gateway {keys.length === 1 ? 'key' : 'keys'}
         </h2>
@@ -83,7 +91,7 @@ export default function GatewayKeysView() {
         title="Gateway Keys"
         subtitle="Keys your clients use to call this gateway. Only a hash is stored."
         actions={
-          <Button className="h-11 md:h-9" onClick={() => setCreating(true)}>
+          <Button className="h-11 md:h-9" onClick={() => setCreating(true)} disabled={!routes}>
             <Plus aria-hidden="true" />
             Create key
           </Button>
@@ -92,7 +100,7 @@ export default function GatewayKeysView() {
       {body}
       <ClientSetup />
       {/* Mounted only while open (or while a revealed one-time key is waiting to be copied), so a hash swap cannot drop it. */}
-      {creating || revealed !== null ? <CreateKeyDialog open onOpenChange={setCreating} routes={routes} /> : null}
+      {(creating && routes) || revealed !== null ? <CreateKeyDialog open onOpenChange={setCreating} routes={routes ?? []} /> : null}
     </div>
   );
 }
