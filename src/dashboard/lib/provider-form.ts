@@ -71,9 +71,10 @@ export function splitKeys(text: string): string[] {
 
 /**
  * Parses a model map or header box. Text starting with `{` is a JSON object (a parse failure comes
- * back as an error, never a throw). Otherwise one `key=value` or `key:value` pair per line; `=` wins
- * when a line has both, so a header value or a model pattern may contain `:`. `#` lines and blank
- * lines are skipped.
+ * back as an error, never a throw). Otherwise one `key=value`, `key:value` or `Header: value` pair per
+ * line; `=` wins when a line has both, so a header value or a model pattern may contain `:`, except
+ * that `: ` (colon then space) before any `=` is the header form and wins. `#` lines and blank lines
+ * are skipped.
  */
 export function linesToMap(text: string): { map: Record<string, string>; error: string | null } {
   const trimmed = text.trim();
@@ -99,7 +100,12 @@ export function linesToMap(text: string): { map: Record<string, string>; error: 
     const line = raw.trim();
     if (!line || line.startsWith('#')) continue;
     const eq = line.indexOf('=');
-    const idx = eq >= 0 ? eq : line.indexOf(':');
+    const colon = line.indexOf(':');
+    // `Name: value` is the usual HTTP header form: a `:` followed by a space and sitting before any `=`
+    // is the separator, so `Authorization: Bearer abc==` keeps its `==`. A `:` with no space after it
+    // (`llama3:8b=x`) stays part of the key.
+    const headerForm = colon > 0 && /\s/.test(line.charAt(colon + 1)) && (eq < 0 || colon < eq);
+    const idx = headerForm ? colon : eq >= 0 ? eq : colon;
     if (idx <= 0) continue;
     const k = line.slice(0, idx).trim();
     const v = line.slice(idx + 1).trim();
@@ -110,7 +116,7 @@ export function linesToMap(text: string): { map: Record<string, string>; error: 
 
 /** True when `linesToMap` would read `key=value` back to exactly this pair. */
 function lineSafe(k: string, v: string): boolean {
-  return k !== '' && k === k.trim() && !/[=\n\r]/.test(k) && !/^[#{]/.test(k) && v === v.trim() && !/[\n\r]/.test(v);
+  return k !== '' && k === k.trim() && !/[=\n\r]/.test(k) && !/:\s/.test(k) && !/^[#{]/.test(k) && v === v.trim() && !/[\n\r]/.test(v);
 }
 
 /**
@@ -163,6 +169,9 @@ export function buildProviderPayload(form: ProviderForm, mode: FormMode): Record
 
 export type FormErrorKey = 'name' | 'base_url' | 'formats' | 'timeout_ms' | 'recheck_hours' | 'balance_divisor' | 'model_map' | 'extra_headers';
 export type FormErrors = Partial<Record<FormErrorKey, string>>;
+
+/** An HTTP header name (RFC 9110 token); the Worker applies the same rule to `extra_headers`. */
+const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 
 const URL_MESSAGE = 'Enter a full URL starting with http:// or https://.';
 
@@ -249,8 +258,12 @@ export function validateProviderForm(form: ProviderForm, _mode: FormMode): FormE
   if (divisor !== '' && !(Number.isFinite(Number(divisor)) && Number(divisor) > 0)) errors.balance_divisor = 'Enter a number above 0.';
   const mapError = linesToMap(form.model_map).error;
   if (mapError) errors.model_map = mapError;
-  const headerError = linesToMap(form.extra_headers).error;
-  if (headerError) errors.extra_headers = headerError;
+  const headers = linesToMap(form.extra_headers);
+  if (headers.error) errors.extra_headers = headers.error;
+  else {
+    const badName = Object.keys(headers.map).find((k) => !HEADER_NAME.test(k));
+    if (badName) errors.extra_headers = `"${badName}" is not a valid header name. Use Name: value or Name=value.`;
+  }
   return errors;
 }
 

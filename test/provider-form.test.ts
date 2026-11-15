@@ -92,6 +92,14 @@ describe('linesToMap / mapToLines', () => {
     expect(linesToMap('a:b=c').map).toEqual({ 'a:b': 'c' });
   });
 
+  it('reads the HTTP header form Name: value without splitting on a later =', () => {
+    expect(linesToMap('Authorization: Bearer abc==').map).toEqual({ Authorization: 'Bearer abc==' });
+    expect(linesToMap('Referer: https://x.test/?a=b').map).toEqual({ Referer: 'https://x.test/?a=b' });
+    expect(linesToMap('llama3:8b=foo').map).toEqual({ 'llama3:8b': 'foo' });
+    const map = { 'a: b': 'c' };
+    expect(linesToMap(mapToLines(map)).map).toEqual(map);
+  });
+
   it('keeps = inside a header value and : inside a model id', () => {
     expect(linesToMap('X-Test=a=b').map).toEqual({ 'X-Test': 'a=b' });
     expect(linesToMap('claude-*=anthropic/claude:beta').map).toEqual({ 'claude-*': 'anthropic/claude:beta' });
@@ -309,6 +317,11 @@ describe('validateProviderForm, Advanced rules', () => {
       expect(validateProviderForm({ ...valid(), balance_divisor: bad }, 'edit').balance_divisor).toBe(msg);
     }
     expect(validateProviderForm({ ...valid(), balance_divisor: '500000' }, 'edit').balance_divisor).toBeUndefined();
+  });
+
+  it('rejects an extra header whose name is not a valid HTTP header name', () => {
+    expect(validateProviderForm({ ...valid(), extra_headers: 'X-Token:dGVzdA==' }, 'edit').extra_headers).toMatch(/not a valid header name/);
+    expect(validateProviderForm({ ...valid(), extra_headers: 'X-Token: dGVzdA==' }, 'edit').extra_headers).toBeUndefined();
   });
 
   it('reports invalid JSON in the model map and the extra headers under their own field', () => {

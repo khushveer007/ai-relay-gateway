@@ -82,12 +82,15 @@ function num(v: unknown, field: string, min: number, max: number, fallback: numb
   return n;
 }
 
-function strMap(v: unknown, field: string): Record<string, string> {
+const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+
+function strMap(v: unknown, field: string, headerNames = false): Record<string, string> {
   if (v === undefined || v === null) return {};
   if (typeof v !== 'object' || Array.isArray(v)) throw bad(`${field} must be an object`);
   const out: Record<string, string> = {};
   for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
     if (!k.trim()) continue;
+    if (headerNames && !HEADER_NAME.test(k.trim())) throw bad(`${field}.${k} is not a valid header name`);
     if (typeof val !== 'string') throw bad(`${field}.${k} must be a string`);
     out[k.trim()] = val.trim();
   }
@@ -137,7 +140,7 @@ function providerColumns(b: Record<string, any>, existing?: Provider) {
     test_model: str(pick('test_model'), 'test_model', { max: 120 }),
     parse_usage: pick('parse_usage') === false ? 0 : 1,
     timeout_ms: Math.round(num(pick('timeout_ms'), 'timeout_ms', 1000, 300_000, 60_000)),
-    extra_headers: JSON.stringify(strMap(pick('extra_headers'), 'extra_headers')),
+    extra_headers: JSON.stringify(strMap(pick('extra_headers'), 'extra_headers', true)),
     enabled: pick('enabled') === false ? 0 : 1,
   };
 }
@@ -288,7 +291,7 @@ s.post('/providers', async (c) => {
 s.post('/providers/test-connection', async (c) => {
   const b = await body(c);
   const base_url = validBaseUrl(str(b.base_url, 'base_url', { required: true, max: 300 })!);
-  const extra_headers = strMap(b.extra_headers, 'extra_headers');
+  const extra_headers = strMap(b.extra_headers, 'extra_headers', true);
   let apiKey = splitKeys(b.keys)[0] ?? null;
   if (!apiKey && b.provider_id !== undefined && b.provider_id !== null && b.provider_id !== '') {
     const rows = await c.env.DB.prepare(

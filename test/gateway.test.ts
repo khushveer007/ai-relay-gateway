@@ -755,6 +755,13 @@ describe('Full Proxy Failover & Admin Integration', () => {
       const badUrl = await adminPost(cookie, '/providers/test-connection', { base_url: 'ftp://x', keys: 'sk-a' });
       expect(badUrl.status).toBe(400);
 
+      const badHeader = await adminPost(cookie, '/providers/test-connection', {
+        base_url: 'https://new-relay.test',
+        keys: 'sk-a',
+        extra_headers: { 'X-Token: dGVzdA': '=' },
+      });
+      expect(badHeader.status).toBe(400);
+
       const anon = await adminPost('', '/providers/test-connection', { base_url: 'https://new-relay.test', keys: 'sk-a' });
       expect(anon.status).toBe(401);
 
