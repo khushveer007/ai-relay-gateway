@@ -148,7 +148,8 @@ export function buildProviderPayload(form: ProviderForm, mode: FormMode): Record
   return payload;
 }
 
-export type FormErrors = Partial<Record<'name' | 'base_url', string>>;
+export type FormErrorKey = 'name' | 'base_url' | 'formats' | 'timeout_ms' | 'recheck_hours' | 'balance_divisor' | 'model_map' | 'extra_headers';
+export type FormErrors = Partial<Record<FormErrorKey, string>>;
 
 const URL_MESSAGE = 'Enter a full URL starting with http:// or https://.';
 
@@ -203,4 +204,9 @@ export function testReducer(state: TestState, action: TestAction): TestState {
     case 'reset':
       return { id: state.id + 1, status: 'idle', result: null };
   }
+}
+
+/** RED stub: replaced in the GREEN commit. */
+export function providerToForm(_dto: unknown): ProviderForm {
+  return emptyProviderForm();
 }
