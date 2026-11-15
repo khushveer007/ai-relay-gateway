@@ -108,17 +108,30 @@ export function linesToMap(text: string): { map: Record<string, string>; error: 
   return { map, error: null };
 }
 
-/** One `key=value` per line; the inverse of linesToMap for the `=` form. */
+/** True when `linesToMap` would read `key=value` back to exactly this pair. */
+function lineSafe(k: string, v: string): boolean {
+  return k !== '' && k === k.trim() && !/[=\n\r]/.test(k) && !/^[#{]/.test(k) && v === v.trim() && !/[\n\r]/.test(v);
+}
+
+/**
+ * One `key=value` per line; the inverse of linesToMap. A pair the line form cannot carry (a key with
+ * `=`, a value with a newline, a key starting with `#` or `{`) switches the whole box to JSON, which
+ * linesToMap also reads, so loading a provider never changes what is saved back (PRV-03).
+ */
 export function mapToLines(map: Record<string, string>): string {
-  return Object.entries(map)
-    .map(([k, v]) => `${k}=${v}`)
-    .join('\n');
+  const entries = Object.entries(map);
+  if (!entries.every(([k, v]) => lineSafe(k, v))) return JSON.stringify(map, null, 2);
+  return entries.map(([k, v]) => `${k}=${v}`).join('\n');
 }
 
 const orNull = (s: string): string | null => (s.trim() ? s.trim() : null);
 
+/** A blank number box means "use the default"; anything else is converted as typed (validation catches NaN). */
+const numOr = (text: string, fallback: number): number => (text.trim() === '' ? fallback : Number(text));
+
 /**
- * The create payload. Formats are sent in canonical order whatever order they were ticked in, blank
+ * The create and edit payload. Edit sends exactly the 17 editable fields and nothing else, custom balance
+ * fields included even when the mode is not custom, so nothing hidden is wiped (D-15). Formats are sent in canonical order whatever order they were ticked in, blank
  * optional text sends null, blank maps send {}, and keys travel as the raw text the Worker splits.
  */
 export function buildProviderPayload(form: ProviderForm, mode: FormMode): Record<string, unknown> {
@@ -127,15 +140,15 @@ export function buildProviderPayload(form: ProviderForm, mode: FormMode): Record
     base_url: form.base_url.trim(),
     formats: PROVIDER_FORMATS.filter((f) => form.formats.includes(f)),
     key_strategy: form.key_strategy,
-    timeout_ms: Number(form.timeout_ms),
+    timeout_ms: numOr(form.timeout_ms, 60000),
     model_map: linesToMap(form.model_map).map,
     model_allowlist: form.model_allowlist,
     balance_mode: form.balance_mode,
     balance_path: orNull(form.balance_path),
     balance_field: orNull(form.balance_field),
-    balance_divisor: Number(form.balance_divisor),
+    balance_divisor: numOr(form.balance_divisor, 1),
     recheck_mode: form.recheck_mode,
-    recheck_hours: Number(form.recheck_hours),
+    recheck_hours: numOr(form.recheck_hours, 6),
     test_model: orNull(form.test_model),
     extra_headers: linesToMap(form.extra_headers).map,
     parse_usage: form.parse_usage,
@@ -162,11 +175,82 @@ function isHttpUrl(raw: string): boolean {
   }
 }
 
-/** Inline errors for the basics. Advanced numeric and map validation arrives in plan 02-02. */
+/** The editable fields of a provider as the dashboard loads them: the structural part of ProviderDTO. */
+export interface ProviderDtoLike {
+  name: string;
+  base_url: string;
+  formats: readonly ProviderFormat[];
+  key_strategy: KeyStrategy;
+  timeout_ms: number;
+  model_map: Record<string, string>;
+  model_allowlist: boolean;
+  balance_mode: BalanceMode;
+  balance_path: string | null;
+  balance_field: string | null;
+  balance_divisor: number;
+  recheck_mode: RecheckMode;
+  recheck_hours: number;
+  test_model: string | null;
+  extra_headers: Record<string, string>;
+  parse_usage: boolean;
+  enabled: boolean;
+}
+
+/**
+ * The form an edit starts from: every loaded value, so saving only the basics sends the rest back
+ * unchanged (PRV-03, D-15). Keys are never loaded (the browser never has them). A new column added to
+ * ProviderDTO later must be added here, to buildProviderPayload and to the round-trip test.
+ */
+export function providerToForm(dto: ProviderDtoLike): ProviderForm {
+  return {
+    name: dto.name,
+    base_url: dto.base_url,
+    keys: '',
+    formats: [...dto.formats],
+    key_strategy: dto.key_strategy,
+    timeout_ms: String(dto.timeout_ms),
+    model_map: mapToLines(dto.model_map),
+    model_allowlist: dto.model_allowlist,
+    balance_mode: dto.balance_mode,
+    balance_path: dto.balance_path ?? '',
+    balance_field: dto.balance_field ?? '',
+    balance_divisor: String(dto.balance_divisor),
+    recheck_mode: dto.recheck_mode,
+    recheck_hours: String(dto.recheck_hours),
+    test_model: dto.test_model ?? '',
+    extra_headers: mapToLines(dto.extra_headers),
+    parse_usage: dto.parse_usage,
+    enabled: dto.enabled,
+    add_to_default: true,
+  };
+}
+
+/** Field names that live inside the collapsed Advanced section; the dialog opens it for these. */
+export const ADVANCED_FIELDS: readonly FormErrorKey[] = ['formats', 'timeout_ms', 'recheck_hours', 'balance_divisor', 'model_map', 'extra_headers'];
+
+const inRange = (text: string, min: number, max: number): boolean => {
+  if (text.trim() === '') return true; // blank means the default
+  const n = Number(text);
+  return Number.isFinite(n) && n >= min && n <= max;
+};
+
+/**
+ * Inline errors, keyed by the field's name so the dialog can open Advanced and focus it. The ranges
+ * mirror the Worker's for a quicker answer only; the Worker still validates every value.
+ */
 export function validateProviderForm(form: ProviderForm, _mode: FormMode): FormErrors {
   const errors: FormErrors = {};
   if (!form.name.trim()) errors.name = 'Enter a name.';
   if (!isHttpUrl(form.base_url)) errors.base_url = URL_MESSAGE;
+  if (form.formats.length === 0) errors.formats = 'Pick at least one format.';
+  if (!inRange(form.timeout_ms, 1000, 300000)) errors.timeout_ms = 'Enter a timeout between 1000 and 300000 ms.';
+  if (!inRange(form.recheck_hours, 0.25, 720)) errors.recheck_hours = 'Enter hours between 0.25 and 720.';
+  const divisor = form.balance_divisor.trim();
+  if (divisor !== '' && !(Number.isFinite(Number(divisor)) && Number(divisor) > 0)) errors.balance_divisor = 'Enter a number above 0.';
+  const mapError = linesToMap(form.model_map).error;
+  if (mapError) errors.model_map = mapError;
+  const headerError = linesToMap(form.extra_headers).error;
+  if (headerError) errors.extra_headers = headerError;
   return errors;
 }
 
@@ -206,7 +290,3 @@ export function testReducer(state: TestState, action: TestAction): TestState {
   }
 }
 
-/** RED stub: replaced in the GREEN commit. */
-export function providerToForm(_dto: unknown): ProviderForm {
-  return emptyProviderForm();
-}

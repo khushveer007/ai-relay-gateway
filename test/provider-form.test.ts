@@ -318,6 +318,11 @@ describe('validateProviderForm, Advanced rules', () => {
     expect(errors.model_map).toBeTruthy();
   });
 
+  it('treats blank number boxes as the default, not as an error', () => {
+    const errors = validateProviderForm({ ...valid(), timeout_ms: '', recheck_hours: '', balance_divisor: '' }, 'edit');
+    expect(errors).toEqual({});
+  });
+
   it('returns no errors for a valid form', () => {
     expect(validateProviderForm(valid(), 'create')).toEqual({});
     expect(validateProviderForm(providerToForm(NON_DEFAULT), 'edit')).toEqual({});
