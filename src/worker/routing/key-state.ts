@@ -45,7 +45,8 @@ export const ACTIVE_PATCH: KeyStatePatch = {
  */
 export function applyKeyPatch(env: Env, key: ProviderKey, patch: KeyStatePatch, now = Date.now()): Promise<unknown> {
   Object.assign(key, patch, { status_changed_at: now });
-  patchCachedKey(key.id, { ...patch, status_changed_at: now });
+  patchCachedKey(key.id, { ...patch, status_changed_at: now }, true);
+  if (!env?.DB) return Promise.resolve();
   return env.DB.batch([keyStateStmt(env.DB, key.id, patch, now), bumpVersionStmt(env.DB)]).catch((e) => {
     console.error('key state write failed', e);
   });

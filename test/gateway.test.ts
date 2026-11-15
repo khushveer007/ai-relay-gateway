@@ -3,7 +3,15 @@ import { createSession, verifySession } from '../src/worker/admin/auth';
 import { invalidateConfig } from '../src/worker/db/cache';
 import { decrypt, encrypt, keyHint, safeEqual, sha256Hex } from '../src/worker/db/crypto';
 import worker from '../src/worker/index';
-import { detectFormat, extractModel, looksLikeJsonError, replaceModel } from '../src/worker/proxy/formats';
+import {
+  detectFormat,
+  extractClientTokens,
+  extractModel,
+  extractModelBytes,
+  looksLikeJsonError,
+  replaceModel,
+  replaceModelBytes,
+} from '../src/worker/proxy/formats';
 import { handleModels, handleProxy } from '../src/worker/proxy/forward';
 import { peekStream } from '../src/worker/proxy/stream-peek';
 import { UsageTap } from '../src/worker/proxy/usage';
@@ -823,6 +831,353 @@ describe('Full Proxy Failover & Admin Integration', () => {
       expect(bound).toContain('sequential');
       expect(bound).toContain('["anthropic","openai-chat"]');
       expect(bound.filter((v) => v === '{}')).toHaveLength(2);
+    });
+  });
+
+  describe('Auth resilience, Stale-While-Revalidate & Large-Body Byte-Level Proxy (intermittent-500-cpu-latency)', () => {
+    it('extracts and rewrites models on raw UTF-8 buffers across 0, 4096, 4097, 16384, and 16385 byte boundaries', () => {
+      const enc = new TextEncoder();
+      const dec = new TextDecoder();
+
+      expect(extractModelBytes(new Uint8Array(0))).toEqual({ model: null, span: null });
+
+      for (const targetLen of [4096, 4097, 16384, 16385]) {
+        // Case A: model in the first 4KB
+        const prefixA = '{"model":"claude-sonnet-4","messages":[{"role":"user","content":"';
+        const suffixA = '"}]}';
+        const padA = 'x'.repeat(Math.max(0, targetLen - prefixA.length - suffixA.length));
+        const bytesA = enc.encode(prefixA + padA + suffixA);
+        expect(bytesA.byteLength).toBe(targetLen);
+        const extA = extractModelBytes(bytesA);
+        expect(extA.model).toBe('claude-sonnet-4');
+        const repA = dec.decode(replaceModelBytes(bytesA, extA.span, 'anthropic/claude-sonnet-4'));
+        expect(repA.startsWith('{"model":"anthropic/claude-sonnet-4"')).toBe(true);
+
+        // Case B: model at the very end (beyond 4KB) after Unicode content
+        const prefixB = '{"messages":[{"role":"user","content":"─…→✓ ';
+        const suffixB = '"}],"model":"claude-sonnet-4"}';
+        const padB = 'a'.repeat(Math.max(0, targetLen - enc.encode(prefixB).byteLength - enc.encode(suffixB).byteLength));
+        const bytesB = enc.encode(prefixB + padB + suffixB);
+        expect(bytesB.byteLength).toBe(targetLen);
+        const extB = extractModelBytes(bytesB);
+        expect(extB.model).toBe('claude-sonnet-4');
+        const repB = dec.decode(replaceModelBytes(bytesB, extB.span, 'anthropic/claude-sonnet-4'));
+        expect(repB.endsWith('"model":"anthropic/claude-sonnet-4"}')).toBe(true);
+      }
+
+      // Escaped \"model\" inside content must not shadow the real top-level "model" field at the tail (>16KB).
+      const escapedBody = enc.encode(
+        `{"messages":[{"role":"user","content":"example \\"model\\":\\"fake\\" ${'z'.repeat(20_000)}"}],"model":"claude-sonnet-4"}`,
+      );
+      const extEsc = extractModelBytes(escapedBody);
+      expect(extEsc.model).toBe('claude-sonnet-4');
+      expect(dec.decode(replaceModelBytes(escapedBody, extEsc.span, 'anthropic/claude-sonnet-4'))).toMatch(
+        /"model":"anthropic\/claude-sonnet-4"\}$/,
+      );
+    });
+
+    it('accepts valid x-api-key on POST /v1/messages?beta=true even when Authorization: Bearer is whitespace or another token', async () => {
+      vi.spyOn(globalThis, 'fetch').mockImplementation(
+        async () =>
+          new Response('{"id":"msg_1","content":[{"type":"text","text":"ok"}]}', {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }),
+      );
+
+      const reqWhitespaceBearer = new Request('https://gw.test/v1/messages?beta=true', {
+        method: 'POST',
+        headers: { authorization: 'Bearer    ', 'x-api-key': GW_TOKEN, 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'claude-sonnet-4', messages: [{ role: 'user', content: 'hi' }] }),
+      });
+      expect(extractClientTokens(reqWhitespaceBearer)).toEqual([GW_TOKEN]);
+      const res1 = await handleProxy(reqWhitespaceBearer, env, makeCtx().ctx);
+      expect(res1.status).toBe(200);
+
+      const reqDualHeader = new Request('https://gw.test/v1/messages?beta=true', {
+        method: 'POST',
+        headers: { authorization: 'Bearer non-gateway-token', 'x-api-key': GW_TOKEN, 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'claude-sonnet-4', messages: [{ role: 'user', content: 'hi' }] }),
+      });
+      expect(extractClientTokens(reqDualHeader)[0]).toBe(GW_TOKEN);
+      const res2 = await handleProxy(reqDualHeader, env, makeCtx().ctx);
+      expect(res2.status).toBe(200);
+    });
+
+    it('retries cold-start transient D1 errors in authenticate() and returns 503 JSON (never unhandled 500) on persistent D1 failure', async () => {
+      vi.spyOn(globalThis, 'fetch').mockImplementation(
+        async () =>
+          new Response('{"id":"msg_1","content":[]}', {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }),
+      );
+
+      // 1. Cold start where first DB.batch throws and retry succeeds -> 200 OK
+      invalidateConfig();
+      let calls = 0;
+      const origBatch = env.DB.batch.bind(env.DB);
+      vi.spyOn(env.DB, 'batch').mockImplementation(async (stmts: any[]) => {
+        calls++;
+        if (calls === 1) throw new Error('D1_ERROR: transient network reset');
+        return origBatch(stmts);
+      });
+
+      const resRecovered = await worker.fetch(
+        new Request('https://gw.test/v1/messages?beta=true', {
+          method: 'POST',
+          headers: { 'x-api-key': GW_TOKEN, 'content-type': 'application/json' },
+          body: JSON.stringify({ model: 'claude-sonnet-4', messages: [{ role: 'user', content: 'hi' }] }),
+        }),
+        env,
+        makeCtx().ctx,
+      );
+      expect(resRecovered.status).toBe(200);
+      expect(calls).toBe(2);
+
+      // 2. Cold start where D1 is completely unreachable -> clean 503 Anthropic JSON error, never unhandled 500
+      invalidateConfig();
+      vi.spyOn(env.DB, 'batch').mockRejectedValue(new Error('D1_ERROR: database unavailable'));
+      const resDown = await worker.fetch(
+        new Request('https://gw.test/v1/messages?beta=true', {
+          method: 'POST',
+          headers: { 'x-api-key': GW_TOKEN, 'content-type': 'application/json' },
+          body: JSON.stringify({ model: 'claude-sonnet-4', messages: [{ role: 'user', content: 'hi' }] }),
+        }),
+        env,
+        makeCtx().ctx,
+      );
+      expect(resDown.status).toBe(503);
+      const errJson = (await resDown.json()) as { type: string; error: { type: string; message: string } };
+      expect(errJson.type).toBe('error');
+      expect(errJson.error.type).toBe('api_error');
+    });
+
+    it('serves warm config via Stale-While-Revalidate after 30s without blocking on D1 or failing when D1 errors, and keeps cached.version synced on key patches', async () => {
+      let versionValue = '1';
+      let versionChecks = 0;
+      let batchLoads = 0;
+      const origPrepare = env.DB.prepare;
+      const origBatch = env.DB.batch;
+
+      env.DB.prepare = ((sql: string) => {
+        const stmt = origPrepare(sql);
+        if (sql.includes("key = 'config_version'") && sql.startsWith('SELECT')) {
+          stmt.first = async () => {
+            versionChecks++;
+            return { value: versionValue } as any;
+          };
+        } else if (sql.includes("key = 'config_version'") && sql.startsWith('UPDATE')) {
+          stmt.run = async () => {
+            versionValue = String(Number(versionValue) + 1);
+            return { results: [], success: true, meta: { changes: 1 } } as any;
+          };
+        }
+        return stmt;
+      }) as any;
+
+      env.DB.batch = (async (stmts: any[]) => {
+        if (stmts.length === 7) batchLoads++;
+        return origBatch(stmts);
+      }) as any;
+
+      let now = 1_000_000;
+      vi.spyOn(Date, 'now').mockImplementation(() => now);
+
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+        const auth = new Headers(init?.headers).get('x-api-key');
+        if (auth === 'sk-provA-key1') return new Response('{"error":{"message":"Quota exceeded"}}', { status: 402 });
+        return new Response('{"id":"msg_ok","content":[]}', { status: 200, headers: { 'content-type': 'application/json' } });
+      });
+
+      // Request 1 (cold): loads config via batch (batchLoads = 1) and rotates key1 -> key2 (bumps version to 2 in D1 AND in cached.version)
+      const c1 = makeCtx();
+      const r1 = await handleProxy(
+        new Request('https://gw.test/v1/messages?beta=true', {
+          method: 'POST',
+          headers: { 'x-api-key': GW_TOKEN },
+          body: JSON.stringify({ model: 'claude-sonnet-4', messages: [] }),
+        }),
+        env,
+        c1.ctx,
+      );
+      await c1.flush();
+      expect(r1.status).toBe(200);
+      expect(batchLoads).toBe(1);
+      expect(versionValue).toBe('2');
+
+      // Advance 35s (> CHECK_MS): Request 2 returns warm config immediately, background check sees version 2 === cached.version 2 (no second 7-table batchLoad!)
+      now += 35_000;
+      const c2 = makeCtx();
+      const r2 = await handleProxy(
+        new Request('https://gw.test/v1/messages?beta=true', {
+          method: 'POST',
+          headers: { 'x-api-key': GW_TOKEN },
+          body: JSON.stringify({ model: 'claude-sonnet-4', messages: [] }),
+        }),
+        env,
+        c2.ctx,
+      );
+      await c2.flush();
+      expect(r2.status).toBe(200);
+      expect(versionChecks).toBe(1);
+      expect(batchLoads).toBe(1);
+    });
+
+    it('rewrites model in-place on >16KB UTF-8 request bodies and extracts split-chunk SSE usage without full-body string decode', async () => {
+      const enc = new TextEncoder();
+      const dec = new TextDecoder();
+      let receivedBodies: Uint8Array[] = [];
+
+      // ProviderA has no usable keys so it routes to ProviderB (which maps claude-sonnet-4 -> anthropic/claude-sonnet-4)
+      mockKeys[0].status = 'exhausted';
+      mockKeys[1].status = 'exhausted';
+
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+        const raw = init?.body;
+        expect(raw).toBeInstanceOf(Uint8Array);
+        receivedBodies.push(raw as Uint8Array);
+
+        const sse = [
+          'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tok',
+          'ens":1234,"cache_read_input_tokens":500,"output_tokens":1}}}\n\n',
+          ...Array(50).fill('event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"chunk "}}\n\n'),
+          'event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":99}}\n\n',
+        ];
+        let idx = 0;
+        const stream = new ReadableStream<Uint8Array>({
+          pull(controller) {
+            if (idx < sse.length) controller.enqueue(enc.encode(sse[idx++]));
+            else controller.close();
+          },
+        });
+        return new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+      });
+
+      const largePrompt = '─…→✓ '.repeat(5000); // > 40 KB UTF-8 body with multi-byte Unicode
+      const payload = `{"model":"claude-sonnet-4","messages":[{"role":"user","content":${JSON.stringify(largePrompt)}}],"stream":true}`;
+      const { ctx, flush } = makeCtx();
+      const res = await handleProxy(
+        new Request('https://gw.test/v1/messages?beta=true', {
+          method: 'POST',
+          headers: { 'x-api-key': GW_TOKEN, 'content-type': 'application/json' },
+          body: enc.encode(payload),
+        }),
+        env,
+        ctx,
+      );
+
+      expect(res.status).toBe(200);
+      // Drain response stream so UsageTap finishes and writes log
+      const reader = res.body!.getReader();
+      while (!(await reader.read()).done) {}
+      await flush();
+
+      expect(receivedBodies).toHaveLength(1);
+      const upstreamHead = dec.decode(receivedBodies[0].subarray(0, 80));
+      expect(upstreamHead.startsWith('{"model":"anthropic/claude-sonnet-4"')).toBe(true);
+      expect(insertedLogs).toHaveLength(1);
+      // insertedLogs[0] bindings: input_tokens=13, output_tokens=14, cache_tokens=15
+      expect(insertedLogs[0][13]).toBe(1234);
+      expect(insertedLogs[0][14]).toBe(99);
+      expect(insertedLogs[0][15]).toBe(500);
+    });
+
+    it('preserves token counts when peekStream boundary splits _tokens" or digits without another _tokens" in the next chunk', async () => {
+      const enc = new TextEncoder();
+      const splitStreams = [
+        // Boundary inside key name ("input_tok" + "ens":4321) across peek.head -> next pull
+        [
+          'event: ping\ndata: {"type":"ping"}\n\nevent: message_start\ndata: {"message":{"usage":{"input_tok',
+          'ens":4321}}}\n\n',
+          'event: message_delta\ndata: {"usage":{"output_tokens":77}}\n\n',
+        ],
+        // Boundary inside digits ("input_tokens":12 + "34) across peek.head -> next pull
+        [
+          'event: ping\ndata: {"type":"ping"}\n\nevent: message_start\ndata: {"message":{"usage":{"input_tokens":12',
+          '34}}}\n\n',
+          'event: message_delta\ndata: {"usage":{"output_tokens":88}}\n\n',
+        ],
+      ];
+
+      for (let s = 0; s < splitStreams.length; s++) {
+        insertedLogs.length = 0;
+        const chunks = splitStreams[s];
+        vi.spyOn(globalThis, 'fetch').mockImplementationOnce(async () => {
+          let i = 0;
+          const stream = new ReadableStream<Uint8Array>({
+            pull(controller) {
+              if (i < chunks.length) controller.enqueue(enc.encode(chunks[i++]));
+              else controller.close();
+            },
+          });
+          return new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+        });
+
+        const { ctx, flush } = makeCtx();
+        const res = await handleProxy(
+          new Request('https://gw.test/v1/messages?beta=true', {
+            method: 'POST',
+            headers: { 'x-api-key': GW_TOKEN, 'content-type': 'application/json' },
+            body: JSON.stringify({ model: 'claude-sonnet-4', messages: [], stream: true }),
+          }),
+          env,
+          ctx,
+        );
+        expect(res.status).toBe(200);
+        const reader = res.body!.getReader();
+        while (!(await reader.read()).done) {}
+        await flush();
+
+        expect(insertedLogs).toHaveLength(1);
+        expect(insertedLogs[0][13]).toBe(s === 0 ? 4321 : 1234);
+        expect(insertedLogs[0][14]).toBe(s === 0 ? 77 : 88);
+      }
+    });
+
+    it('handles non-ASCII provider names and missing/wrong ENCRYPTION_KEY cleanly without 500 crashes', async () => {
+      mockProviders[0].name = '中转 🚀';
+      invalidateConfig();
+
+      vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+        new Response('{"id":"msg_1","content":[]}', { status: 200, headers: { 'content-type': 'application/json' } }),
+      );
+      const c1 = makeCtx();
+      const r1 = await handleProxy(
+        new Request('https://gw.test/v1/messages?beta=true', {
+          method: 'POST',
+          headers: { 'x-api-key': GW_TOKEN, 'content-type': 'application/json' },
+          body: JSON.stringify({ model: 'claude-sonnet-4', messages: [] }),
+        }),
+        env,
+        c1.ctx,
+      );
+      await c1.flush();
+      expect(r1.status).toBe(200);
+      expect(r1.headers.get('x-gateway-provider')).toBeTruthy();
+
+      // Missing/invalid auth returns 401 Anthropic JSON, never 500
+      const unauth = await worker.fetch(
+        new Request('https://gw.test/v1/messages?beta=true', { method: 'POST', body: '{}' }),
+        env,
+        makeCtx().ctx,
+      );
+      expect(unauth.status).toBe(401);
+
+      // Corrupted ENCRYPTION_KEY / wrong secret fails gracefully with 402 instead of throwing 500
+      const badEnv = { ...env, ENCRYPTION_KEY: 'wrong-encryption-secret' };
+      const c2 = makeCtx();
+      const r2 = await handleProxy(
+        new Request('https://gw.test/v1/messages?beta=true', {
+          method: 'POST',
+          headers: { 'x-api-key': GW_TOKEN, 'content-type': 'application/json' },
+          body: JSON.stringify({ model: 'claude-sonnet-4', messages: [] }),
+        }),
+        badEnv,
+        c2.ctx,
+      );
+      await c2.flush();
+      expect(r2.status).toBe(402);
     });
   });
 });

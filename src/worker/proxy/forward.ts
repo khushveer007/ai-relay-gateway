@@ -12,10 +12,13 @@ import {
   buildUpstreamUrl,
   detectFormat,
   errorResponse,
-  extractClientToken,
+  extractClientTokens,
   extractModel,
+  extractModelBytes,
   looksLikeJsonError,
   replaceModel,
+  replaceModelBytes,
+  type ModelByteSpan,
 } from './formats';
 import { newLog, writeLog, type LogEntry } from './logs';
 import { peekStream, type PeekResult } from './stream-peek';
@@ -23,6 +26,10 @@ import { UsageTap, type Usage } from './usage';
 
 /** Workers free plan allows 50 subrequests per invocation; keep headroom for D1 calls. */
 const HARD_ATTEMPT_CAP = 40;
+
+/** Bodies larger than 16 KB stay as raw UTF-8 Uint8Arrays to avoid multi-MB UTF-16 string decode/re-encode CPU spikes. */
+const SMALL_BODY_BYTES = 16_384;
+const bodyDecoder = new TextDecoder();
 
 interface Failure {
   status: number;
@@ -35,15 +42,33 @@ async function authenticate(
   req: Request,
   env: Env,
   format: Format,
+  ctx?: ExecutionContext,
 ): Promise<{ config: Config; gk: GatewayKey } | Response> {
-  const token = extractClientToken(req);
-  if (!token) {
+  let tokens: string[];
+  try {
+    tokens = extractClientTokens(req);
+  } catch {
+    tokens = [];
+  }
+  if (tokens.length === 0) {
     return errorResponse(format, 401, 'Missing gateway key. Send it as "Authorization: Bearer sk-gw-…" or "x-api-key".', 'authentication_error');
   }
-  const config = await getConfig(env);
-  const gk = config.gatewayKeysByHash.get(await sha256Hex(token));
-  if (!gk || !gk.enabled) return errorResponse(format, 401, 'Invalid or disabled gateway key.', 'authentication_error');
-  return { config, gk };
+  let config: Config;
+  try {
+    config = await getConfig(env, ctx);
+  } catch (err) {
+    console.error('config load failed in authenticate', err);
+    return errorResponse(format, 503, 'Gateway configuration database is temporarily unavailable.', 'api_error');
+  }
+  for (const token of tokens) {
+    try {
+      const gk = config.gatewayKeysByHash.get(await sha256Hex(token));
+      if (gk && gk.enabled) return { config, gk };
+    } catch {
+      /* ignore malformed token candidate */
+    }
+  }
+  return errorResponse(format, 401, 'Invalid or disabled gateway key.', 'authentication_error');
 }
 
 export async function handleProxy(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -53,15 +78,10 @@ export async function handleProxy(req: Request, env: Env, ctx: ExecutionContext)
   const format = detectFormat(path);
   const log = newLog(path, format);
 
-  const auth = await authenticate(req, env, format);
+  const auth = await authenticate(req, env, format, ctx);
   if (auth instanceof Response) return auth;
   const { config, gk } = auth;
   log.gateway_key_id = gk.id;
-
-  const hasBody = req.method !== 'GET' && req.method !== 'HEAD';
-  const body = hasBody ? await req.text() : '';
-  const model = hasBody ? extractModel(body) : null;
-  log.model = model;
 
   const finishWithError = (res: Response, error: string): Response => {
     log.status = res.status;
@@ -70,6 +90,29 @@ export async function handleProxy(req: Request, env: Env, ctx: ExecutionContext)
     ctx.waitUntil(writeLog(env, log));
     return res;
   };
+
+  const hasBody = req.method !== 'GET' && req.method !== 'HEAD';
+  let rawBytes: Uint8Array | null = null;
+  let bodyText = '';
+  let model: string | null = null;
+  let modelSpan: ModelByteSpan | null = null;
+
+  if (hasBody) {
+    try {
+      rawBytes = new Uint8Array(await req.arrayBuffer());
+    } catch {
+      return finishWithError(errorResponse(format, 400, 'Could not read request body.', 'invalid_request_error'), 'unreadable request body');
+    }
+    if (rawBytes.byteLength <= SMALL_BODY_BYTES) {
+      bodyText = bodyDecoder.decode(rawBytes);
+      model = extractModel(bodyText);
+    } else {
+      const extracted = extractModelBytes(rawBytes);
+      model = extracted.model;
+      modelSpan = extracted.span;
+    }
+  }
+  log.model = model;
 
   const route = resolveRoute(config, gk, model);
   if (!route) {
@@ -93,13 +136,25 @@ export async function handleProxy(req: Request, env: Env, ctx: ExecutionContext)
 
   providers: for (const provider of candidates) {
     const keys = orderKeys(provider, config.keysByProvider.get(provider.id) ?? []);
+    if (keys.length === 0) continue;
+
+    // Compute mapped model and rewritten payload once per provider, not on every key rotation attempt.
+    const upstreamModel = model ? mapModel(provider, model) : null;
+    const rewriteModel = !!(upstreamModel && upstreamModel !== model);
+    const upstreamBody: BodyInit | undefined = !hasBody
+      ? undefined
+      : rawBytes && rawBytes.byteLength > SMALL_BODY_BYTES
+        ? rewriteModel
+          ? (replaceModelBytes(rawBytes, modelSpan, upstreamModel!) as unknown as BodyInit)
+          : (rawBytes as unknown as BodyInit)
+        : rewriteModel
+          ? replaceModel(bodyText, upstreamModel!)
+          : bodyText;
 
     for (const key of keys) {
       if (attempts.length >= maxAttempts) break providers;
       if (!isUsable(key)) continue; // may have been disabled by a concurrent request in this isolate
 
-      const upstreamModel = model ? mapModel(provider, model) : null;
-      const upstreamBody = upstreamModel && upstreamModel !== model ? replaceModel(body, upstreamModel) : body;
       const attempt: Attempt = {
         provider_id: provider.id,
         provider: provider.name,
@@ -117,13 +172,21 @@ export async function handleProxy(req: Request, env: Env, ctx: ExecutionContext)
       try {
         apiKey = await plainKey(env, key);
       } catch {
+        const reason = 'cannot decrypt key (ENCRYPTION_KEY changed?)';
         attempt.action = 'INVALID_KEY';
-        attempt.reason = 'cannot decrypt key (ENCRYPTION_KEY changed?)';
+        attempt.reason = reason;
+        lastFailure = {
+          status: 0,
+          text: reason,
+          headers: null,
+          cls: { action: 'INVALID_KEY', ruleId: null, cooldownS: null, reason },
+        };
         continue;
       }
 
+      const timeoutMs = provider.timeout_ms > 0 ? provider.timeout_ms : 60_000;
       const ac = new AbortController();
-      const timer = setTimeout(() => ac.abort(new Error('timeout')), provider.timeout_ms);
+      const timer = setTimeout(() => ac.abort(new Error('timeout')), timeoutMs);
       let failure: Failure | null = null;
       let success: Response | null = null;
 
@@ -131,7 +194,7 @@ export async function handleProxy(req: Request, env: Env, ctx: ExecutionContext)
         const res = await fetch(buildUpstreamUrl(provider.base_url, path, url.search), {
           method: req.method,
           headers: buildUpstreamHeaders(req.headers, format, apiKey, provider.extra_headers),
-          body: hasBody ? upstreamBody : undefined,
+          body: upstreamBody,
           signal: ac.signal,
         });
         attempt.status = res.status;
@@ -163,10 +226,12 @@ export async function handleProxy(req: Request, env: Env, ctx: ExecutionContext)
           if (looksLikeJsonError(text)) {
             failure = { status: 200, text, headers: res.headers, cls: classify(config.rules, provider.id, 200, text) };
           } else {
-            const tap = new UsageTap();
-            if (provider.parse_usage) tap.feedText(text);
+            if (provider.parse_usage) {
+              const tap = new UsageTap();
+              tap.feedText(text);
+              applyUsage(log, tap.usage);
+            }
             log.ttfb_ms = Date.now() - started;
-            applyUsage(log, tap.usage);
             success = new Response(text, { status: res.status, headers: gatewayHeaders(res.headers, provider, attempts) });
             log.status = res.status;
             log.latency_ms = Date.now() - started;
@@ -287,14 +352,22 @@ function streamToClient(
     resolveDone();
   };
 
+  const headers = buildClientHeaders(res.headers, {
+    'x-gateway-provider': provider.name,
+    'x-gateway-attempts': String(log.attempts.length),
+    'cache-control': 'no-cache',
+  });
+
+  if (peek.done) {
+    tap?.seedHead(peek.head, peek.headText);
+    finish();
+    return new Response(peek.head as unknown as BodyInit, { status: res.status, headers });
+  }
+
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
-      tap?.feed(peek.head);
-      controller.enqueue(peek.head);
-      if (peek.done) {
-        controller.close();
-        finish();
-      }
+      tap?.seedHead(peek.head, peek.headText);
+      if (peek.head.length > 0) controller.enqueue(peek.head);
     },
     async pull(controller) {
       try {
@@ -317,20 +390,13 @@ function streamToClient(
     },
   });
 
-  return new Response(stream, {
-    status: res.status,
-    headers: buildClientHeaders(res.headers, {
-      'x-gateway-provider': provider.name,
-      'x-gateway-attempts': String(log.attempts.length),
-      'cache-control': 'no-cache',
-    }),
-  });
+  return new Response(stream, { status: res.status, headers });
 }
 
 /** GET /v1/models: merged model list of the providers reachable with this gateway key. */
-export async function handleModels(req: Request, env: Env): Promise<Response> {
+export async function handleModels(req: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
   const format = detectFormat(new URL(req.url).pathname);
-  const auth = await authenticate(req, env, format);
+  const auth = await authenticate(req, env, format, ctx);
   if (auth instanceof Response) return auth;
   const { config, gk } = auth;
 

@@ -3,6 +3,9 @@
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
+const HEX = Array.from({ length: 256 }, (_, i) => i.toString(16).padStart(2, '0'));
+const sha256Cache = new Map<string, string>();
+
 function toB64(buf: ArrayBuffer | Uint8Array): string {
   const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
   let s = '';
@@ -18,21 +21,41 @@ function fromB64(b64: string): Uint8Array {
 }
 
 function toHex(buf: ArrayBuffer): string {
-  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  const bytes = new Uint8Array(buf);
+  let out = '';
+  for (let i = 0; i < bytes.length; i++) out += HEX[bytes[i]];
+  return out;
 }
 
 export async function sha256Hex(input: string): Promise<string> {
-  return toHex(await crypto.subtle.digest('SHA-256', enc.encode(input)));
+  if (input.length <= 256) {
+    const hit = sha256Cache.get(input);
+    if (hit !== undefined) return hit;
+  }
+  const digest = toHex(await crypto.subtle.digest('SHA-256', enc.encode(input)));
+  if (input.length <= 256) {
+    if (sha256Cache.size > 1000) sha256Cache.clear();
+    sha256Cache.set(input, digest);
+  }
+  return digest;
 }
 
 const aesKeyCache = new Map<string, Promise<CryptoKey>>();
 
 function aesKey(secret: string): Promise<CryptoKey> {
+  if (!secret || typeof secret !== 'string') {
+    return Promise.reject(new Error('ENCRYPTION_KEY is not configured'));
+  }
   let p = aesKeyCache.get(secret);
   if (!p) {
+    if (aesKeyCache.size > 100) aesKeyCache.clear();
     p = crypto.subtle
       .digest('SHA-256', enc.encode(secret))
-      .then((raw) => crypto.subtle.importKey('raw', raw, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']));
+      .then((raw) => crypto.subtle.importKey('raw', raw, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']))
+      .catch((err) => {
+        aesKeyCache.delete(secret);
+        throw err;
+      });
     aesKeyCache.set(secret, p);
   }
   return p;
@@ -49,11 +72,13 @@ export async function encrypt(plaintext: string, secret: string): Promise<string
 }
 
 export async function decrypt(payload: string, secret: string): Promise<string> {
+  if (!payload || typeof payload !== 'string') throw new Error('empty ciphertext');
   const bytes = fromB64(payload);
+  if (bytes.byteLength <= 12) throw new Error('malformed ciphertext');
   const pt = await crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv: bytes.slice(0, 12) },
+    { name: 'AES-GCM', iv: bytes.subarray(0, 12) },
     await aesKey(secret),
-    bytes.slice(12),
+    bytes.subarray(12),
   );
   return dec.decode(pt);
 }
@@ -61,9 +86,18 @@ export async function decrypt(payload: string, secret: string): Promise<string> 
 const hmacKeyCache = new Map<string, Promise<CryptoKey>>();
 
 function hmacKey(secret: string): Promise<CryptoKey> {
+  if (!secret || typeof secret !== 'string') {
+    return Promise.reject(new Error('SESSION_SECRET is not configured'));
+  }
   let p = hmacKeyCache.get(secret);
   if (!p) {
-    p = crypto.subtle.importKey('raw', enc.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify']);
+    if (hmacKeyCache.size > 100) hmacKeyCache.clear();
+    p = crypto.subtle
+      .importKey('raw', enc.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify'])
+      .catch((err) => {
+        hmacKeyCache.delete(secret);
+        throw err;
+      });
     hmacKeyCache.set(secret, p);
   }
   return p;

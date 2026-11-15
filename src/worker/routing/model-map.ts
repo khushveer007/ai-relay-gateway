@@ -34,8 +34,7 @@ function hasMapping(provider: Provider, model: string): boolean {
 
 /** Whether a provider can serve the requested client model. */
 export function supportsModel(provider: Provider, model: string | null): boolean {
-  if (!model) return true;
+  if (!model || !provider.model_allowlist) return true;
   if (hasMapping(provider, model)) return true;
-  if (!provider.model_allowlist) return true;
   return provider.models.includes(model);
 }

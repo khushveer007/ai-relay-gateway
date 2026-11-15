@@ -46,6 +46,7 @@ export function newLog(path: string, format: string): LogEntry {
 
 /** One INSERT per request: the only D1 write on the happy path. */
 export function writeLog(env: Env, e: LogEntry): Promise<unknown> {
+  if (!env?.DB) return Promise.resolve();
   const failovers = Math.max(0, e.attempts.length - 1);
   return env.DB.prepare(
     `INSERT INTO request_logs

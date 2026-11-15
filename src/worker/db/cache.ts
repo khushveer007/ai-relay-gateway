@@ -13,39 +13,77 @@ const CHECK_MS = 30_000;
 let cached: Config | null = null;
 let checkedAt = 0;
 let loading: Promise<Config> | null = null;
+let epoch = 0;
 
-export async function getConfig(env: Env): Promise<Config> {
-  const now = Date.now();
-  if (cached && now - checkedAt < CHECK_MS) return cached;
+function refreshConfig(env: Env): Promise<Config> {
   if (loading) return loading;
-
-  loading = (async () => {
+  const startEpoch = epoch;
+  let p!: Promise<Config>;
+  p = (async () => {
     try {
       if (cached) {
         const v = await getConfigVersion(env.DB);
         if (v === cached.version) {
-          checkedAt = Date.now();
+          if (epoch === startEpoch) checkedAt = Date.now();
           return cached;
         }
       }
-      cached = await loadConfig(env.DB);
-      checkedAt = Date.now();
-      return cached;
+      let next: Config;
+      try {
+        next = await loadConfig(env.DB);
+      } catch (firstErr) {
+        if (cached) throw firstErr;
+        // Cold-start transient D1 failure: retry once before giving up.
+        next = await loadConfig(env.DB);
+      }
+      if (epoch === startEpoch) {
+        cached = next;
+        checkedAt = Date.now();
+      }
+      return next;
+    } catch (err) {
+      if (cached && epoch === startEpoch) {
+        checkedAt = Date.now();
+        return cached;
+      }
+      throw err;
     } finally {
-      loading = null;
+      if (loading === p) loading = null;
     }
   })();
-  return loading;
+  loading = p;
+  return p;
+}
+
+export async function getConfig(env: Env, ctx?: ExecutionContext): Promise<Config> {
+  const now = Date.now();
+  if (cached) {
+    if (now - checkedAt < CHECK_MS) return cached;
+    // Stale-while-revalidate on the proxy hot path: return warm config in 0 ms and refresh in the background.
+    if (ctx) {
+      checkedAt = now;
+      ctx.waitUntil(refreshConfig(env).catch(() => {}));
+      return cached;
+    }
+  }
+  return refreshConfig(env);
 }
 
 export function invalidateConfig(): void {
+  epoch++;
   cached = null;
   checkedAt = 0;
+  loading = null;
+  plainKeys.clear();
 }
 
 /** Applies a key-state change to the in-memory config so this isolate reacts instantly. */
-export function patchCachedKey(keyId: number, patch: Partial<ProviderKey>): void {
+export function patchCachedKey(keyId: number, patch: Partial<ProviderKey>, bumpVersion = false): void {
   if (!cached) return;
+  if (bumpVersion) {
+    cached.version += 1;
+    cached.settings.config_version = cached.version;
+  }
   for (const list of cached.keysByProvider.values()) {
     const k = list.find((x) => x.id === keyId);
     if (k) {
@@ -56,9 +94,14 @@ export function patchCachedKey(keyId: number, patch: Partial<ProviderKey>): void
 }
 
 const plainKeys = new Map<string, string>();
+let lastEncSecret = '';
 
 /** Decrypts an upstream key, memoized per ciphertext. */
 export async function plainKey(env: Env, key: ProviderKey): Promise<string> {
+  if (env.ENCRYPTION_KEY !== lastEncSecret) {
+    plainKeys.clear();
+    lastEncSecret = env.ENCRYPTION_KEY ?? '';
+  }
   const hit = plainKeys.get(key.key_enc);
   if (hit !== undefined) return hit;
   const pt = await decrypt(key.key_enc, env.ENCRYPTION_KEY);
