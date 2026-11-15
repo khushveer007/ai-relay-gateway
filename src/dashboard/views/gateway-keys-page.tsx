@@ -8,6 +8,8 @@ import { PageError } from '@/components/page-error';
 import { PageHeader } from '@/components/page-header';
 import { useLoadErrorToast } from '@/hooks/use-load-error-toast';
 import { gatewayKeysQuery, routesQuery } from '@/lib/queries';
+import { ClientSetup } from './gateway-keys/client-setup';
+import { CreateKeyDialog } from './gateway-keys/create-key-dialog';
 import { GatewayKeyCard } from './gateway-keys/gateway-key-card';
 
 const LOAD_MESSAGE = 'Failed to load Gateway Keys. Check your connection and try again.';
@@ -34,7 +36,6 @@ function KeySkeleton() {
 export default function GatewayKeysView() {
   const keysQ = useQuery(gatewayKeysQuery);
   const routesQ = useQuery(routesQuery);
-  // Set by Create key; the create-and-reveal dialog that consumes it is added by the next task.
   const [creating, setCreating] = useState(false);
   useLoadErrorToast(keysQ, 'gateway-keys-load', LOAD_MESSAGE);
 
@@ -88,8 +89,9 @@ export default function GatewayKeysView() {
         }
       />
       {body}
-      {/* The create-and-reveal dialog mounts here when `creating` is set (next task). */}
-      <span hidden data-creating={creating} />
+      <ClientSetup />
+      {/* Mounted only while open, so the form and any revealed key are gone once it closes. */}
+      {creating ? <CreateKeyDialog open onOpenChange={setCreating} routes={routes} /> : null}
     </div>
   );
 }

@@ -20,11 +20,13 @@ export function useSession(): SessionInfo {
 
 /**
  * Marks the session signed out and drops every other cached query, so no stats or provider data
- * stays in memory for the next person using the device (T-01-07).
+ * stays in memory for the next person using the device (T-01-07). The mutation cache is cleared too.
  */
 export function endSession(queryClient: QueryClient): void {
   queryClient.setQueryData(['session'], false);
   queryClient.removeQueries({ predicate: (q) => q.queryKey[0] !== 'session' });
+  // Nothing from a finished session stays in memory on a shared device, not even a mutation result.
+  queryClient.getMutationCache().clear();
 }
 
 /**
