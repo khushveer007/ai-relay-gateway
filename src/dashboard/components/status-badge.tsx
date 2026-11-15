@@ -57,3 +57,14 @@ export function EnabledBadge({ enabled }: { enabled: boolean }) {
     </Badge>
   );
 }
+
+/** HTTP status pill for a request or an attempt: 2xx ok, 3xx neutral, 4xx, 5xx and 0 danger. The text is the code. */
+export function HttpStatusBadge({ status }: { status: number }) {
+  const tone: Tone = status >= 200 && status < 300 ? 'ok' : status >= 300 && status < 400 ? 'neutral' : 'danger';
+  return (
+    <Badge variant="outline" className={cn('border-transparent', TONE_CLASS[tone])}>
+      {toneDot()}
+      {status}
+    </Badge>
+  );
+}
