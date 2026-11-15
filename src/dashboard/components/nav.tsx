@@ -7,7 +7,7 @@ import { Separator } from '@/components/ui/separator';
 import { cn } from '@/lib/utils';
 import { NAV_LABEL, VIEW_IDS, type ViewId } from '@/lib/routes';
 
-const NAV_ICON: Record<ViewId, LucideIcon> = {
+export const NAV_ICON: Record<ViewId, LucideIcon> = {
   overview: LayoutDashboard,
   providers: Zap,
   routes: Route,
@@ -16,8 +16,9 @@ const NAV_ICON: Record<ViewId, LucideIcon> = {
   settings: Settings,
 };
 
-function ProxyUrlBox() {
+export function ProxyUrlBox() {
   const [copied, setCopied] = useState(false);
+  const urlRef = useRef<HTMLDivElement>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   // The Proxy Base URL is the public origin only: no keys or secrets are ever shown here (T-01-13).
   const origin = window.location.origin;
@@ -31,6 +32,15 @@ function ProxyUrlBox() {
       clearTimeout(timer.current);
       timer.current = setTimeout(() => setCopied(false), 1500);
     } catch {
+      // Select the text as well, so the operator only has to use the phone's own Copy action.
+      const el = urlRef.current;
+      const selection = window.getSelection();
+      if (el && selection) {
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        selection.removeAllRanges();
+        selection.addRange(range);
+      }
       toast.error('Copy failed. Select the URL and copy it by hand.');
     }
   };
@@ -43,7 +53,9 @@ function ProxyUrlBox() {
           {copied ? 'Copied' : 'Copy'}
         </Button>
       </div>
-      <div className="mt-1 break-all font-mono text-xs text-cyan select-all">{origin}</div>
+      <div ref={urlRef} className="mt-1 break-all font-mono text-xs text-cyan select-all">
+        {origin}
+      </div>
     </div>
   );
 }

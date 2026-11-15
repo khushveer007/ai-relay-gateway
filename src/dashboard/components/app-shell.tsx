@@ -1,11 +1,9 @@
-import { Suspense, useEffect, useState, type ReactNode } from 'react';
-import { Menu } from 'lucide-react';
-import { Button } from '@/components/ui/button';
-import { Sheet, SheetContent, SheetTitle, SheetTrigger } from '@/components/ui/sheet';
+import { Suspense, useEffect, useRef, type ReactNode } from 'react';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ErrorBoundary } from '@/components/error-boundary';
+import { BottomNav } from '@/components/bottom-nav';
 import { SidebarContent } from '@/components/nav';
-import type { ViewId } from '@/lib/routes';
+import { NAV_LABEL, type ViewId } from '@/lib/routes';
 
 /** Shown in the content region only while a view chunk loads; the navigation never shows a loading state. */
 function ViewSkeleton() {
@@ -30,11 +28,17 @@ interface AppShellProps {
 }
 
 export function AppShell({ view, onSignOut, signingOut, children }: AppShellProps) {
-  const [menuOpen, setMenuOpen] = useState(false);
+  const firstView = useRef(true);
 
-  // Close the phone menu whenever the destination changes.
+  // The hash router keeps the scroll position across views, so every change starts at the top, and
+  // focus moves to the main region (after the first mount) so a screen reader announces the new page.
   useEffect(() => {
-    setMenuOpen(false);
+    window.scrollTo(0, 0);
+    if (firstView.current) {
+      firstView.current = false;
+      return;
+    }
+    document.getElementById('view-root')?.focus({ preventScroll: true });
   }, [view]);
 
   return (
@@ -44,34 +48,24 @@ export function AppShell({ view, onSignOut, signingOut, children }: AppShellProp
         <SidebarContent view={view} onSignOut={onSignOut} signingOut={signingOut} />
       </aside>
 
-      {/* Below 768px: a top bar with an icon-only trigger for the slide-in menu. */}
-      <header className="sticky top-0 z-30 flex items-center gap-2 border-b border-border-subtle bg-card px-2 py-1 md:hidden">
-        <Sheet open={menuOpen} onOpenChange={setMenuOpen}>
-          <SheetTrigger asChild>
-            <Button variant="ghost" size="icon" aria-label="Open navigation">
-              <Menu aria-hidden="true" />
-            </Button>
-          </SheetTrigger>
-          <SheetContent side="left" className="w-72 gap-0 p-0" aria-describedby={undefined}>
-            <SheetTitle className="sr-only">Navigation</SheetTitle>
-            <SidebarContent
-              view={view}
-              onSignOut={onSignOut}
-              signingOut={signingOut}
-              onNavigate={() => setMenuOpen(false)}
-            />
-          </SheetContent>
-        </Sheet>
-        <span className="truncate text-sm font-semibold">AI Relay Gateway</span>
+      {/* Below 768px: a title-only top bar; navigation is the bottom bar (D-01, D-02). */}
+      <header className="sticky top-0 z-30 border-b border-border-subtle bg-card px-4 py-3 md:hidden">
+        <span className="block truncate text-sm font-semibold">{NAV_LABEL[view]}</span>
       </header>
 
       <div className="md:pl-64">
-        <main id="view-root" className="mx-auto max-w-screen-xl p-4 md:p-8">
+        <main
+          id="view-root"
+          tabIndex={-1}
+          className="mx-auto max-w-screen-xl p-4 pb-[calc(3.5rem+env(safe-area-inset-bottom)+1rem)] outline-none md:p-8"
+        >
           <ErrorBoundary resetKey={view}>
             <Suspense fallback={<ViewSkeleton />}>{children}</Suspense>
           </ErrorBoundary>
         </main>
       </div>
+
+      <BottomNav view={view} onSignOut={onSignOut} signingOut={signingOut} />
     </div>
   );
 }

@@ -21,9 +21,15 @@ export function parseHash(hash: string): ViewId {
   return (VIEW_IDS as readonly string[]).includes(id) ? (id as ViewId) : 'overview';
 }
 
-// RED stubs: the real slot lists arrive in the GREEN commit.
-export const BOTTOM_VIEW_IDS: readonly ViewId[] = [];
-export const MORE_VIEW_IDS: readonly ViewId[] = [];
-export function isMoreActive(_view: ViewId): boolean {
-  return false;
+/**
+ * Below 768px the bottom bar shows four destinations plus a More slot (D-01). Every ViewId must be in
+ * exactly one of the two lists; test/shell.test.ts fails when a seventh destination is added to
+ * VIEW_IDS without a slot, so More has to absorb it deliberately.
+ */
+export const BOTTOM_VIEW_IDS = ['overview', 'providers', 'routes', 'logs'] as const;
+export const MORE_VIEW_IDS = ['gateway-keys', 'settings'] as const;
+
+/** True when the current view lives under the More slot, so the slot reads as active (D-02). */
+export function isMoreActive(view: ViewId): boolean {
+  return (MORE_VIEW_IDS as readonly string[]).includes(view);
 }
