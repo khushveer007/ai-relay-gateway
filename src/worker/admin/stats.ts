@@ -45,7 +45,7 @@ export async function getStats(env: Env, hours: number) {
       .bind(since),
     db
       .prepare(
-        `SELECT (ts / ?) * ? AS bucket, COUNT(*) AS requests,
+        `SELECT CAST(ts / ? AS INTEGER) * ? AS bucket, COUNT(*) AS requests,
                 SUM(CASE WHEN status >= 200 AND status < 300 THEN 0 ELSE 1 END) AS errors,
                 SUM(CASE WHEN failovers > 0 THEN 1 ELSE 0 END) AS failovers,
                 COALESCE(SUM(output_tokens), 0) AS output_tokens

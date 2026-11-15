@@ -7,6 +7,7 @@ import { detectFormat, extractModel, looksLikeJsonError, replaceModel } from '..
 import { handleModels, handleProxy } from '../src/worker/proxy/forward';
 import { peekStream } from '../src/worker/proxy/stream-peek';
 import { UsageTap } from '../src/worker/proxy/usage';
+import { buildProviderPayload, emptyProviderForm } from '../src/dashboard/lib/provider-form';
 import { classify } from '../src/worker/routing/error-rules';
 import { globMatch, mapModel, supportsModel } from '../src/worker/routing/model-map';
 import { resolveRoute } from '../src/worker/routing/resolve-route';
@@ -284,12 +285,16 @@ describe('Full Proxy Failover & Admin Integration', () => {
   let mockSettings: Record<string, unknown>[];
   let insertedLogs: unknown[][];
   let keyUpdates: Array<{ id: number; status: string; reason: string | null }>;
+  let providerInserts: unknown[][];
+  let providerUpdates: unknown[][];
   let env: Env;
 
   beforeEach(async () => {
     invalidateConfig();
     insertedLogs = [];
     keyUpdates = [];
+    providerInserts = [];
+    providerUpdates = [];
 
     const k1Enc = await encrypt('sk-provA-key1', ENC_SECRET);
     const k2Enc = await encrypt('sk-provA-key2', ENC_SECRET);
@@ -387,6 +392,12 @@ describe('Full Proxy Failover & Admin Integration', () => {
             insertedLogs.push(bound);
           } else if (sql.includes('UPDATE provider_keys')) {
             keyUpdates.push({ id: Number(bound[5]), status: String(bound[0]), reason: bound[1] as string | null });
+          } else if (sql.startsWith('UPDATE providers SET')) {
+            providerUpdates.push(bound);
+          } else if (sql.startsWith('INSERT INTO providers')) {
+            // The create handler reads res.results[0].id from RETURNING id.
+            providerInserts.push(bound);
+            return { results: [{ id: 3 }], success: true, meta: { changes: 1 } };
           }
           return { results: [], success: true, meta: { changes: 1 } };
         },
@@ -402,6 +413,7 @@ describe('Full Proxy Failover & Admin Integration', () => {
         },
         async first() {
           if (sql.includes("key = 'config_version'")) return { value: '1' };
+          if (sql.includes('SELECT * FROM providers WHERE id')) return mockProviders.find((p) => p.id === bound[0]) ?? null;
           return null;
         },
       };
@@ -625,5 +637,192 @@ describe('Full Proxy Failover & Admin Integration', () => {
       makeCtx().ctx,
     );
     expect(csrfBlocked.status).toBe(415);
+  });
+  async function adminCookie(): Promise<string> {
+    const res = await worker.fetch(
+      new Request('https://gw.test/api/admin/login', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ password: ADMIN_PW }),
+      }),
+      env,
+      makeCtx().ctx,
+    );
+    return res.headers.get('set-cookie')!.split(';')[0];
+  }
+
+  async function adminPost(cookie: string, path: string, payload: unknown): Promise<Response> {
+    return await worker.fetch(
+      new Request(`https://gw.test/api/admin${path}`, {
+        method: 'POST',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify(payload),
+      }),
+      env,
+      makeCtx().ctx,
+    );
+  }
+
+  it('add-provider tracer: Test connection, then create with the form payload (PRV-01, PRV-04)', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      async () =>
+        new Response('{"data":[{"id":"m1"},{"id":"m2"}]}', { status: 200, headers: { 'content-type': 'application/json' } }),
+    );
+    const cookie = await adminCookie();
+
+    const tested = await adminPost(cookie, '/providers/test-connection', { base_url: 'https://new-relay.test/', keys: 'sk-new-1' });
+    expect(tested.status).toBe(200);
+    const testedJson = (await tested.json()) as { ok: boolean; count: number };
+    expect(testedJson).toMatchObject({ ok: true, count: 2 });
+    expect(String(fetchMock.mock.calls[0][0])).toMatch(/^https:\/\/new-relay\.test\/v1\/models/);
+
+    const form = { ...emptyProviderForm(), name: 'New Relay', base_url: 'https://new-relay.test/', keys: 'sk-new-1' };
+    const created = await adminPost(cookie, '/providers', buildProviderPayload(form, 'create'));
+    expect(created.status).toBe(201);
+    expect(providerInserts).toHaveLength(1);
+    const bound = providerInserts[0];
+    expect(bound).toContain('https://new-relay.test');
+    expect(bound).not.toContain('https://new-relay.test/');
+    expect(bound).toContain('["anthropic","openai-chat","openai-responses"]');
+  });
+  describe('providers test-connection and merge', () => {
+    const modelsOk = () =>
+      new Response('{"data":[{"id":"m1"},{"id":"m2"}]}', { status: 200, headers: { 'content-type': 'application/json' } });
+
+    it('D-17 create mode: a typed key goes upstream as x-api-key and Bearer, and the answer is ok with a count', async () => {
+      const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => modelsOk());
+      const cookie = await adminCookie();
+      const res = await adminPost(cookie, '/providers/test-connection', { base_url: 'https://new-relay.test', keys: 'sk-typed-1\nsk-typed-2' });
+      expect(res.status).toBe(200);
+      const json = (await res.json()) as { ok: boolean; count: number; ms: number };
+      expect(json.ok).toBe(true);
+      expect(typeof json.count).toBe('number');
+      const headers = new Headers((fetchMock.mock.calls[0][1] as RequestInit).headers);
+      expect(headers.get('x-api-key')).toBe('sk-typed-1');
+      expect(headers.get('authorization')).toBe('Bearer sk-typed-1');
+    });
+
+    it('D-19 edit mode: the stored first key is used server-side and never appears in the response', async () => {
+      const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => modelsOk());
+      const cookie = await adminCookie();
+      const res = await adminPost(cookie, '/providers/test-connection', { base_url: 'https://prov-a.test', provider_id: 1 });
+      expect(res.status).toBe(200);
+      const text = await res.text();
+      expect(new Headers((fetchMock.mock.calls[0][1] as RequestInit).headers).get('x-api-key')).toBe('sk-provA-key1');
+      expect(text).not.toContain('sk-provA-key1');
+      expect(JSON.parse(text)).toMatchObject({ ok: true, count: 2 });
+    });
+
+    it('D-17, D-18 read-only: nothing is written, no key changes state, and no D1 batch runs', async () => {
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('{"error":"quota exceeded"}', { status: 402 }));
+      const cookie = await adminCookie();
+      const batchSpy = vi.spyOn(env.DB, 'batch');
+      const ok = await adminPost(cookie, '/providers/test-connection', { base_url: 'https://prov-a.test', provider_id: 1 });
+      const failed = await adminPost(cookie, '/providers/test-connection', { base_url: 'https://new-relay.test', keys: 'sk-x' });
+      expect(ok.status).toBe(200);
+      expect(failed.status).toBe(200);
+      expect(keyUpdates).toEqual([]);
+      expect(insertedLogs).toEqual([]);
+      expect(providerInserts).toEqual([]);
+      expect(providerUpdates).toEqual([]);
+      expect(batchSpy).not.toHaveBeenCalled();
+    });
+
+    it('D-18 redaction: an upstream 401 that echoes the key comes back without it; a network failure is status 0', async () => {
+      const cookie = await adminCookie();
+      vi.spyOn(globalThis, 'fetch').mockImplementation(
+        async () => new Response('{"error":"Invalid token sk-secret-echo-9"}', { status: 401 }),
+      );
+      const res = await adminPost(cookie, '/providers/test-connection', { base_url: 'https://new-relay.test', keys: 'sk-secret-echo-9' });
+      const text = await res.text();
+      expect(res.status).toBe(200);
+      expect(text).not.toContain('sk-secret-echo-9');
+      expect(JSON.parse(text)).toMatchObject({ ok: false, status: 401 });
+      expect(JSON.parse(text).message).toContain('***');
+
+      vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('fetch failed'));
+      const net = await adminPost(cookie, '/providers/test-connection', { base_url: 'https://new-relay.test', keys: 'sk-secret-echo-9' });
+      expect(net.status).toBe(200);
+      expect(await net.json()).toMatchObject({ ok: false, status: 0 });
+    });
+
+    it('WR-04: a key echoed across the 200-character cut is redacted before truncation', async () => {
+      const key = 'sk-secret-echo-straddle-1234567890';
+      const body = `{"error":"${'x'.repeat(150)} token ${key}"}`;
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(body, { status: 401 }));
+      const cookie = await adminCookie();
+      const tested = await adminPost(cookie, '/providers/test-connection', { base_url: 'https://new-relay.test', keys: key });
+      const text = await tested.text();
+      expect(text).not.toContain(key.slice(0, 12));
+      expect(JSON.parse(text)).toMatchObject({ ok: false, status: 401 });
+      expect(JSON.parse(text).message).toContain('***');
+    });
+
+    it('WR-03: a 200 that is not a model list, or not JSON, is reported as a 200 verdict, not as success or unreachable', async () => {
+      const cookie = await adminCookie();
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('{"error":{"message":"bad token"}}', { status: 200 }));
+      const errBody = await adminPost(cookie, '/providers/test-connection', { base_url: 'https://new-relay.test', keys: 'sk-a' });
+      expect(await errBody.json()).toMatchObject({ ok: false, status: 200, message: expect.stringContaining('did not return a model list') });
+
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('<html>relay</html>', { status: 200 }));
+      const html = await adminPost(cookie, '/providers/test-connection', { base_url: 'https://new-relay.test', keys: 'sk-a' });
+      expect(await html.json()).toMatchObject({ ok: false, status: 200 });
+
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('{"data":[]}', { status: 200 }));
+      const empty = await adminPost(cookie, '/providers/test-connection', { base_url: 'https://new-relay.test', keys: 'sk-a' });
+      expect(await empty.json()).toMatchObject({ ok: true, count: 0 });
+    });
+
+    it('D-17 guards: no key is 400, a bad URL is 400, no session is 401, a text/plain body is 415', async () => {
+      const cookie = await adminCookie();
+      const noKey = await adminPost(cookie, '/providers/test-connection', { base_url: 'https://new-relay.test' });
+      expect(noKey.status).toBe(400);
+      expect(await noKey.json()).toEqual({ error: 'no key to test with' });
+
+      const badUrl = await adminPost(cookie, '/providers/test-connection', { base_url: 'ftp://x', keys: 'sk-a' });
+      expect(badUrl.status).toBe(400);
+
+      const badHeader = await adminPost(cookie, '/providers/test-connection', {
+        base_url: 'https://new-relay.test',
+        keys: 'sk-a',
+        extra_headers: { 'X-Token: dGVzdA': '=' },
+      });
+      expect(badHeader.status).toBe(400);
+
+      const anon = await adminPost('', '/providers/test-connection', { base_url: 'https://new-relay.test', keys: 'sk-a' });
+      expect(anon.status).toBe(401);
+
+      const plain = await worker.fetch(
+        new Request('https://gw.test/api/admin/providers/test-connection', {
+          method: 'POST',
+          headers: { cookie, 'content-type': 'text/plain' },
+          body: '{}',
+        }),
+        env,
+        makeCtx().ctx,
+      );
+      expect(plain.status).toBe(415);
+    });
+
+    it('PRV-03 server layer: PUT with only name and base_url keeps every other stored value', async () => {
+      const cookie = await adminCookie();
+      const res = await worker.fetch(
+        new Request('https://gw.test/api/admin/providers/1', {
+          method: 'PUT',
+          headers: { cookie, 'content-type': 'application/json' },
+          body: JSON.stringify({ name: 'Renamed', base_url: 'https://prov-a.test' }),
+        }),
+        env,
+        makeCtx().ctx,
+      );
+      expect(res.status).toBe(200);
+      expect(providerUpdates).toHaveLength(1);
+      const bound = providerUpdates[0];
+      expect(bound).toContain('Renamed');
+      expect(bound).toContain(5000);
+      expect(bound).toContain('sequential');
+      expect(bound).toContain('["anthropic","openai-chat"]');
+      expect(bound.filter((v) => v === '{}')).toHaveLength(2);
+    });
   });
 });

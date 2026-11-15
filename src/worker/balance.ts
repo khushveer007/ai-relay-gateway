@@ -19,6 +19,9 @@ export interface TestResult {
 
 const TIMEOUT = 15_000;
 
+/** What test connection says when a relay answers 200 but the body is not a model list. */
+export const NOT_A_MODEL_LIST = 'The relay answered 200 but did not return a model list';
+
 function authHeaders(key: string, extra: Record<string, string>): Headers {
   const h = new Headers({
     authorization: `Bearer ${key}`,
@@ -32,7 +35,8 @@ function authHeaders(key: string, extra: Record<string, string>): Headers {
 
 async function getJson(url: string, key: string, extra: Record<string, string>): Promise<any> {
   const res = await fetch(url, { headers: authHeaders(key, extra), signal: AbortSignal.timeout(TIMEOUT) });
-  const text = await res.text();
+  // Redact before truncating: a key that straddles the cut would otherwise leave its first characters behind.
+  const text = key ? (await res.text()).split(key).join('***') : await res.text();
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
   try {
     return JSON.parse(text);
@@ -139,10 +143,20 @@ export async function testKey(env: Env, provider: Provider, key: ProviderKey, ru
   }
 }
 
-/** Fetches the provider's model list from GET /v1/models (OpenAI and Anthropic list formats). */
-export async function fetchModels(provider: Pick<Provider, 'base_url' | 'extra_headers'>, apiKey: string): Promise<string[]> {
+/**
+ * Fetches the provider's model list from GET /v1/models (OpenAI and Anthropic list formats).
+ * `strict` (test connection) throws when a 200 body holds no model list at all, so a relay that
+ * answers 200 with an error body is not reported as a working connection with 0 models.
+ */
+export async function fetchModels(
+  provider: Pick<Provider, 'base_url' | 'extra_headers'>,
+  apiKey: string,
+  opts: { strict?: boolean } = {},
+): Promise<string[]> {
   const j = await getJson(buildUpstreamUrl(provider.base_url, '/v1/models?limit=1000'), apiKey, provider.extra_headers);
-  const list: unknown[] = Array.isArray(j) ? j : Array.isArray(j?.data) ? j.data : Array.isArray(j?.models) ? j.models : [];
+  const found = Array.isArray(j) ? j : Array.isArray(j?.data) ? j.data : Array.isArray(j?.models) ? j.models : null;
+  if (found === null && opts.strict) throw new Error(`HTTP 200: ${NOT_A_MODEL_LIST}`);
+  const list: unknown[] = found ?? [];
   const ids = list
     .map((m: any) => (typeof m === 'string' ? m : m?.id ?? m?.name))
     .filter((x): x is string => typeof x === 'string' && x.length > 0)

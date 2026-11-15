@@ -10,7 +10,8 @@
     "skipLibCheck": true,
     "isolatedModules": true,
     "noEmit": true,
-    "resolveJsonModule": true
+    "resolveJsonModule": true,
+    "paths": { "@/*": ["./src/dashboard/*"] }
   },
   "include": ["src/worker/**/*.ts", "test/**/*.ts"]
 }

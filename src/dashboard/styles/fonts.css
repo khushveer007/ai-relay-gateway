@@ -1,0 +1,17 @@
+/* Self-hosted so no third-party stylesheet blocks first paint (WR-05). Vite hashes the files into
+   /assets/, where the immutable cache rule applies and the CSP's font-src 'self' is enough. */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 400 600;
+  font-display: swap;
+  src: url('../assets/fonts/inter-latin.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400 600;
+  font-display: swap;
+  src: url('../assets/fonts/jetbrains-mono-latin.woff2') format('woff2');
+}
