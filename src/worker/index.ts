@@ -22,6 +22,13 @@ app.options('/v1/*', () =>
 app.get('/v1/models', (c) => handleModels(c.req.raw, c.env));
 app.all('/v1/*', (c) => handleProxy(c.req.raw, c.env, c.executionCtx as ExecutionContext));
 
+// Admin JSON is never cached (T-02-24): a stale key status or provider list on a control panel is
+// dangerous. `_headers` cannot reach Worker-generated responses (`run_worker_first` covers /api/*).
+app.use('/api/admin/*', async (c, next) => {
+  await next();
+  c.res.headers.set('Cache-Control', 'no-store');
+});
+
 app.route('/api/admin', admin);
 app.get('/api/health', (c) => c.json({ ok: true, ts: Date.now() }));
 app.all('/api/*', (c) => c.json({ error: 'not found' }, 404));

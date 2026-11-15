@@ -2,7 +2,8 @@
 // End-to-end smoke check for the rebuilt dashboard, run against `wrangler dev` on 127.0.0.1:8787.
 //
 //   node scripts/smoke-dashboard.mjs                  checks 1-10
-//   node scripts/smoke-dashboard.mjs --check-headers  also check 11 (cache headers on built assets)
+//   node scripts/smoke-dashboard.mjs --check-headers  also checks 11-16 (cache headers on built assets, security
+//                                                     headers, manifest and icons, no Google font host, no-store)
 //   node scripts/smoke-dashboard.mjs --skip-render    skip check 10 (no Chrome on this machine)
 //
 // Env: CHROME_BIN optionally points at a Chrome or Chromium binary for check 10.
@@ -296,6 +297,82 @@ async function main() {
         `status ${res.status}, cache-control "${cc}"${bad.length ? `, unexpected: ${bad.join(', ')}` : ''}`,
       );
     }
+    // 12. Security headers on / and on a SPA fallback path (T-02-22, T-02-23, WR-04).
+    const SECURITY = [
+      ['x-content-type-options', (v) => v.toLowerCase() === 'nosniff'],
+      ['x-frame-options', (v) => v.toUpperCase() === 'DENY'],
+      ['referrer-policy', (v) => v.toLowerCase() === 'no-referrer'],
+      ['content-security-policy', (v) => v.includes("default-src 'self'") && v.includes("frame-ancestors 'none'")],
+    ];
+    const securityProblems = (res) => SECURITY.filter(([name, ok]) => !ok(res.headers.get(name) || '')).map(([name]) => name);
+    for (const path of ['/', '/some/unknown/path']) {
+      const res = await fetch(`${BASE}${path}`);
+      await res.arrayBuffer();
+      const missing = securityProblems(res);
+      report(
+        res.status === 200 && missing.length === 0,
+        `check 12: GET ${path} carries the security headers and the CSP`,
+        `status ${res.status}${missing.length ? `, missing or wrong: ${missing.join(', ')}` : ''}`,
+      );
+    }
+
+    // 13. A hashed JS asset keeps exactly the immutable rule (no second Cache-Control) and also carries the CSP.
+    if (jsPath) {
+      const res = await fetch(`${BASE}${jsPath}`);
+      await res.arrayBuffer();
+      const cc = res.headers.get('cache-control') || '';
+      const missing = securityProblems(res);
+      report(
+        cc === 'public, max-age=31536000, immutable' && missing.length === 0,
+        'check 13: hashed JS asset has the exact immutable Cache-Control and the CSP',
+        `cache-control "${cc}"${missing.length ? `, missing or wrong: ${missing.join(', ')}` : ''}`,
+      );
+    }
+
+    // 14. No third-party font host in the served HTML.
+    const googleHosts = ['fonts.googleapis.com', 'fonts.gstatic.com'].filter((h) => html.includes(h));
+    report(googleHosts.length === 0, 'check 14: the served HTML names no Google font host', googleHosts.join(', '));
+
+    // 15. Manifest fields, and every icon is a real PNG (a missing file would come back as the SPA HTML with 200).
+    const mres = await fetch(`${BASE}/manifest.webmanifest`);
+    const mtext = await mres.text();
+    let manifest = null;
+    try {
+      manifest = JSON.parse(mtext);
+    } catch {
+      /* reported below */
+    }
+    const manifestOk =
+      mres.status === 200 &&
+      jsonType(mres) &&
+      manifest?.name === 'AI Relay Gateway' &&
+      manifest?.short_name === 'Gateway' &&
+      manifest?.display === 'standalone' &&
+      manifest?.start_url === '/' &&
+      manifest?.scope === '/' &&
+      Array.isArray(manifest?.icons) &&
+      manifest.icons.length > 0;
+    report(manifestOk, 'check 15: GET /manifest.webmanifest is JSON with the install fields', `status ${mres.status}, content-type "${mres.headers.get('content-type') || ''}"`);
+    for (const icon of manifest?.icons ?? []) {
+      const res = await fetch(`${BASE}${icon.src}`);
+      const bytes = new Uint8Array(await res.arrayBuffer());
+      const png = bytes.length > 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47;
+      report(
+        res.status === 200 && (res.headers.get('content-type') || '').includes('image/png') && png,
+        `check 15: icon ${icon.src} is a PNG`,
+        `status ${res.status}, content-type "${res.headers.get('content-type') || ''}", ${bytes.length} bytes`,
+      );
+    }
+
+    // 16. Admin JSON is never cached (the Worker sets it; _headers cannot reach Worker responses).
+    const adminRes = await fetch(`${BASE}/api/admin/session`, { headers: { cookie } });
+    await adminRes.arrayBuffer();
+    report(
+      adminRes.status === 200 && (adminRes.headers.get('cache-control') || '').toLowerCase().includes('no-store'),
+      'check 16: GET /api/admin/session answers Cache-Control no-store',
+      `status ${adminRes.status}, cache-control "${adminRes.headers.get('cache-control') || ''}"`,
+    );
+
     info('cache-control of /', `"${index.headers.get('cache-control') || ''}"`);
     const missing = await fetch(`${BASE}/assets/does-not-exist-0000.js`);
     await missing.arrayBuffer();
