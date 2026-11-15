@@ -113,3 +113,8 @@ export function keyDetailText(key: KeyTextInput): string {
   }
   return detail;
 }
+
+/** RED stub: replaced in the GREEN commit. */
+export function keyReasonLine(key: KeyTextInput): string | null {
+  return key.status_reason ? 'stub' : null;
+}
