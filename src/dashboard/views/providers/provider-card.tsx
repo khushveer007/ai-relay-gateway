@@ -1,6 +1,7 @@
 import { Badge } from '@/components/ui/badge';
 import { Card } from '@/components/ui/card';
 import { EnabledBadge } from '@/components/status-badge';
+import { useReorderKeys } from '@/hooks/use-key-actions';
 import type { ProviderDTO } from '@/lib/api';
 import { KeyRow } from './key-row';
 
@@ -11,6 +12,19 @@ export function ProviderCard({ provider }: { provider: ProviderDTO }) {
   const total = provider.keys.length;
   const active = provider.keys.filter((k) => k.status === 'active').length;
   const keyWord = total === 1 ? 'key' : 'keys';
+  const reorder = useReorderKeys(provider.id);
+
+  // Move up and Move down swap with the neighbour. The ids list is built from the CURRENT cached key
+  // order at click time, so a stale list is never sent (Pitfall 10, D-09). No drag and drop.
+  const onMove = (keyId: number, delta: -1 | 1) => {
+    if (reorder.isPending) return;
+    const ids = provider.keys.map((k) => k.id);
+    const from = ids.indexOf(keyId);
+    const to = from + delta;
+    if (from < 0 || to < 0 || to >= ids.length) return;
+    [ids[from], ids[to]] = [ids[to], ids[from]];
+    reorder.mutate(ids);
+  };
 
   return (
     <Card className="gap-4 p-4">
@@ -56,9 +70,9 @@ export function ProviderCard({ provider }: { provider: ProviderDTO }) {
         </p>
       ) : (
         <div className="flex flex-col">
-          {provider.keys.map((k) => (
+          {provider.keys.map((k, i) => (
             <div key={k.id} className="border-t border-border-subtle">
-              <KeyRow keyDto={k} />
+              <KeyRow keyDto={k} index={i} count={total} reordering={reorder.isPending} onMove={onMove} />
             </div>
           ))}
         </div>

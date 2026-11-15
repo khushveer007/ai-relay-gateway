@@ -1,20 +1,36 @@
+import { Ellipsis } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { KeyStatusBadge } from '@/components/status-badge';
-import { useEnableKey, useTestKey } from '@/hooks/use-key-actions';
+import { useDisableKey, useEnableKey, useRecheckKey, useTestKey } from '@/hooks/use-key-actions';
 import type { ProviderKeyDTO } from '@/lib/api';
 import { fmtAgo, fmtBalance } from '@/lib/format';
 import { keyReasonLine } from '@/lib/overview';
+
+interface KeyRowProps {
+  keyDto: ProviderKeyDTO;
+  /** Position in the provider's key list, for the Move up and Move down ends. */
+  index: number;
+  count: number;
+  /** The provider's reorder request is running (including its refetch): both Move items are disabled. */
+  reordering: boolean;
+  onMove: (keyId: number, delta: -1 | 1) => void;
+}
 
 /**
  * One upstream key. The mutation hooks live in the row so each row owns its own pending state, not a
  * shared last-call-wins observer (research correction C4). Only `key_hint` is rendered, never the key.
  */
-export function KeyRow({ keyDto }: { keyDto: ProviderKeyDTO }) {
+export function KeyRow({ keyDto, index, count, reordering, onMove }: KeyRowProps) {
   const enable = useEnableKey();
+  const disable = useDisableKey();
   const test = useTestKey();
+  const recheck = useRecheckKey();
   const reason = keyReasonLine(keyDto);
   const isActive = keyDto.status === 'active';
+  const label = keyDto.alias || keyDto.key_hint;
   const mainPending = isActive ? test.isPending : enable.isPending;
+  const statusPending = enable.isPending || disable.isPending;
 
   return (
     <div className="grid gap-2 py-3 md:grid-cols-[1fr_auto] md:items-center md:gap-x-4">
@@ -43,6 +59,38 @@ export function KeyRow({ keyDto }: { keyDto: ProviderKeyDTO }) {
         >
           {isActive ? (test.isPending ? 'Testing…' : 'Test') : enable.isPending ? 'Enabling…' : 'Enable'}
         </Button>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" size="icon" aria-label={`Key actions for ${label}`}>
+              <Ellipsis aria-hidden="true" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" collisionPadding={8}>
+            <DropdownMenuItem disabled={test.isPending} onSelect={() => test.mutate(keyDto.id)}>
+              {test.isPending ? 'Testing…' : 'Test'}
+            </DropdownMenuItem>
+            {keyDto.status === 'exhausted' ? (
+              <DropdownMenuItem disabled={recheck.isPending} onSelect={() => recheck.mutate(keyDto.id)}>
+                {recheck.isPending ? 'Rechecking…' : 'Recheck'}
+              </DropdownMenuItem>
+            ) : null}
+            {isActive ? (
+              <DropdownMenuItem disabled={statusPending} onSelect={() => disable.mutate(keyDto.id)}>
+                Disable
+              </DropdownMenuItem>
+            ) : (
+              <DropdownMenuItem disabled={statusPending} onSelect={() => enable.mutate(keyDto.id)}>
+                Enable
+              </DropdownMenuItem>
+            )}
+            <DropdownMenuItem disabled={reordering || index === 0} onSelect={() => onMove(keyDto.id, -1)}>
+              Move up
+            </DropdownMenuItem>
+            <DropdownMenuItem disabled={reordering || index === count - 1} onSelect={() => onMove(keyDto.id, 1)}>
+              Move down
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
     </div>
   );
