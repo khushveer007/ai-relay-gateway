@@ -27,7 +27,7 @@ function concat(chunks: Uint8Array[], total: number): Uint8Array {
 
 /** Returns the first SSE event that carries a data line, or null if none is complete yet. */
 export function firstDataEvent(text: string): string | null {
-  const normalized = text.replace(/\r\n/g, '\n');
+  const normalized = text.indexOf('\r') !== -1 ? text.replace(/\r\n/g, '\n') : text;
   let start = 0;
   while (true) {
     const end = normalized.indexOf('\n\n', start);

@@ -15,7 +15,7 @@ type Row = Record<string, unknown>;
 function json<T>(v: unknown, fallback: T): T {
   if (typeof v !== 'string' || v === '') return fallback;
   try {
-    return JSON.parse(v) as T;
+    return (JSON.parse(v) as T) ?? fallback;
   } catch {
     return fallback;
   }
@@ -107,6 +107,7 @@ export function parseSettings(rows: Row[]): Settings {
 
 /** Loads the full routing configuration in a single D1 round-trip (batch). */
 export async function loadConfig(db: D1Database): Promise<Config> {
+  if (!db) throw new Error('D1 database binding DB is not configured');
   const [p, k, r, rp, er, gk, s] = await db.batch([
     db.prepare('SELECT * FROM providers ORDER BY id'),
     db.prepare('SELECT * FROM provider_keys ORDER BY provider_id, priority, id'),
@@ -118,13 +119,13 @@ export async function loadConfig(db: D1Database): Promise<Config> {
   ]);
 
   const providers = new Map<number, Provider>();
-  for (const row of p.results as Row[]) {
+  for (const row of (p?.results ?? []) as Row[]) {
     const prov = parseProvider(row);
     providers.set(prov.id, prov);
   }
 
   const keysByProvider = new Map<number, ProviderKey[]>();
-  for (const row of k.results as Row[]) {
+  for (const row of (k?.results ?? []) as Row[]) {
     const key = parseKey(row);
     const list = keysByProvider.get(key.provider_id) ?? [];
     list.push(key);
@@ -132,12 +133,12 @@ export async function loadConfig(db: D1Database): Promise<Config> {
   }
 
   const chain = new Map<number, number[]>();
-  for (const row of rp.results as Row[]) {
+  for (const row of (rp?.results ?? []) as Row[]) {
     const list = chain.get(Number(row.route_id)) ?? [];
     list.push(Number(row.provider_id));
     chain.set(Number(row.route_id), list);
   }
-  const routes: Route[] = (r.results as Row[]).map((row) => ({
+  const routes: Route[] = ((r?.results ?? []) as Row[]).map((row) => ({
     id: Number(row.id),
     name: String(row.name),
     model_patterns: json<string[]>(row.model_patterns, []),
@@ -147,24 +148,25 @@ export async function loadConfig(db: D1Database): Promise<Config> {
   }));
 
   const gatewayKeysByHash = new Map<string, GatewayKey>();
-  for (const row of gk.results as Row[]) {
+  for (const row of (gk?.results ?? []) as Row[]) {
     const g = parseGatewayKey(row);
     gatewayKeysByHash.set(g.key_hash, g);
   }
 
-  const settings = parseSettings(s.results as Row[]);
+  const settings = parseSettings((s?.results ?? []) as Row[]);
   return {
     version: settings.config_version,
     providers,
     keysByProvider,
     routes,
-    rules: (er.results as Row[]).map(parseRule),
+    rules: ((er?.results ?? []) as Row[]).map(parseRule),
     gatewayKeysByHash,
     settings,
   };
 }
 
 export async function getConfigVersion(db: D1Database): Promise<number> {
+  if (!db) throw new Error('D1 database binding DB is not configured');
   const row = await db.prepare("SELECT value FROM settings WHERE key = 'config_version'").first<{ value: string }>();
   return Number(row?.value ?? 0);
 }
