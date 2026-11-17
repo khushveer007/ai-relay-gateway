@@ -32,19 +32,15 @@ Requests from Claude Code and Codex keep working through key rotation and provid
 - ✓ Stats: totals and time series by model/provider/key — existing
 - ✓ Cron: clear expired cooldowns, recheck due exhausted keys, refresh stale balances, daily log cleanup — existing
 - ✓ Interactive `npm run setup` provisioning and deploy — existing
+- ✓ Dashboard rebuilt on React + shadcn/ui (Tailwind, Radix primitives), still built by Vite into `dist/ui` and served as Workers Static Assets — Phase 1 & Phase 2
+- ✓ Every existing view and action works on the new stack: overview, providers + keys, routes, gateway keys, logs, settings, error rules, rule tester, login — Phase 1 & Phase 2
+- ✓ Fully usable on a phone: every management task (add provider, paste keys, edit routes and rules, view stats and logs) works at phone widths, with no horizontal page scrolling and touch-sized controls — Phase 2
+- ✓ Tables collapse into card or stacked layouts on narrow screens; dialogs become full-screen sheets or drawers on mobile — Phase 1 & Phase 2
+- ✓ The add/edit provider dialog shows only the basics up front: name, base URL, and API keys — Phase 2
+- ✓ Everything else (formats, key strategy, timeout, model map, allowlist, balance mode/path/field/divisor, recheck mode/interval, test model, extra headers, parse usage) sits in a collapsed "Advanced" section with sensible defaults — Phase 2
+- ✓ A provider can be created by filling only the basic fields — Phase 2
 
 ### Active
-
-**Dashboard revamp (lands first; later features are built on it)**
-- [ ] Dashboard rebuilt on React + shadcn/ui (Tailwind, Radix primitives), still built by Vite into `dist/ui` and served as Workers Static Assets
-- [ ] Every existing view and action works on the new stack: overview, providers + keys, routes, gateway keys, logs, settings, error rules, rule tester, login
-- [ ] Fully usable on a phone: every management task (add provider, paste keys, edit routes and rules, view stats and logs) works at phone widths, with no horizontal page scrolling and touch-sized controls
-- [ ] Tables collapse into card or stacked layouts on narrow screens; dialogs become full-screen sheets or drawers on mobile
-
-**Simpler add-provider dialog**
-- [ ] The add/edit provider dialog shows only the basics up front: name, base URL, and API keys
-- [ ] Everything else (formats, key strategy, timeout, model map, allowlist, balance mode/path/field/divisor, recheck mode/interval, test model, extra headers, parse usage) sits in a collapsed "Advanced" section with sensible defaults
-- [ ] A provider can be created by filling only the basic fields
 
 **Clear key-drop rules**
 - [ ] Error-rule actions are shown in plain language, e.g. "Drop key until I re-enable it", "Pause key for N min", "Mark out of balance (auto-recheck)", "Try next provider", "Return error to client", instead of raw `EXHAUSTED` / `INVALID_KEY` codes
@@ -123,4 +119,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-11-13 after initialization*
+*Last updated: 2026-11-16 after Phase 2*
