@@ -21,6 +21,8 @@ export const DROP_CODE_ERRORS: Record<CodeError, string> = {
 };
 
 export const DROP_MESSAGE_NEEDS_CODES = 'Add a status code to use this message.';
+export const STATUS_CODES_MAX_CHARS = 100;
+export const STATUS_CODES_LENGTH_ERROR = 'Use 100 characters or fewer for status codes.';
 
 const CODES_PATTERN = /^(\d{3}(-\d{3})?)(,\d{3}(-\d{3})?)*$/;
 const RISKY_AMBER = [400, 404, 408, 413, 422, 429];

@@ -1,7 +1,14 @@
 // Pure form model for the provider dialog. The Worker tsconfig type-checks test imports, so this
 // module imports only pure helpers. The API client needs DOM types the Worker lacks.
 
-import { DROP_CODE_ERRORS, DROP_MESSAGE_NEEDS_CODES, normalizeCodes, parseStatusCodes } from './status-codes';
+import {
+  DROP_CODE_ERRORS,
+  DROP_MESSAGE_NEEDS_CODES,
+  STATUS_CODES_LENGTH_ERROR,
+  STATUS_CODES_MAX_CHARS,
+  normalizeCodes,
+  parseStatusCodes,
+} from './status-codes';
 
 /** Canonical wire-format order. The payload always lists formats in this order (PRV-02 ordering). */
 export const PROVIDER_FORMATS = ['anthropic', 'openai-chat', 'openai-responses'] as const;
@@ -309,6 +316,7 @@ export function validateProviderForm(form: ProviderForm, _mode: FormMode): FormE
   if (!isHttpUrl(form.base_url)) errors.base_url = URL_MESSAGE;
   const drop = parseStatusCodes(form.drop_codes);
   if (drop.error) errors.drop_codes = DROP_CODE_ERRORS[drop.error];
+  else if (drop.codes.length > STATUS_CODES_MAX_CHARS) errors.drop_codes = STATUS_CODES_LENGTH_ERROR;
   else if (!drop.codes && form.drop_message.trim()) errors.drop_codes = DROP_MESSAGE_NEEDS_CODES;
   if (form.formats.length === 0) errors.formats = 'Pick at least one format.';
   if (!inRange(form.timeout_ms, 1000, 300000)) errors.timeout_ms = 'Enter a timeout between 1000 and 300000 ms.';

@@ -1,5 +1,5 @@
 import { actionLabel } from './format';
-import { parseStatusCodes } from './status-codes';
+import { STATUS_CODES_LENGTH_ERROR, STATUS_CODES_MAX_CHARS, parseStatusCodes } from './status-codes';
 
 // Pure settings and rule models shared with the tests.
 // The ranges mirror the Worker (PUT /settings, ruleInput) for UX only; the Worker still validates.
@@ -151,7 +151,8 @@ export function validateRuleForm(form: RuleForm): RuleErrors {
   const errors: RuleErrors = {};
   const { codes, error } = parseStatusCodes(form.status_codes, RULE_CODE_RANGE);
   if (error) errors.status_codes = 'Use a code like 402, 401,403 or 500-599.';
-  if (!error && !codes && !form.body_regex.trim()) errors.rule = 'Add a status code, a body regex, or both.';
+  else if (codes.length > STATUS_CODES_MAX_CHARS) errors.status_codes = STATUS_CODES_LENGTH_ERROR;
+  else if (!codes && !form.body_regex.trim()) errors.rule = 'Add a status code, a body regex, or both.';
   if (!wholeInRange(form.priority, 0, 100000)) errors.priority = 'Enter a priority from 0 to 100000.';
   if (form.action === 'RATE_LIMITED' && !wholeInRange(form.cooldown_s, 1, 604800)) errors.cooldown_s = 'Enter seconds from 1 to 604800.';
   return errors;

@@ -160,6 +160,15 @@ describe('validateProviderForm', () => {
     const form = { ...emptyProviderForm(), drop_codes, drop_message };
     expect(validateProviderForm(form, 'edit').drop_codes).toBe(expected);
   });
+
+  it('rejects an overlong code list after normalization', () => {
+    const form = { ...emptyProviderForm(), name: 'A', base_url: 'https://r.test' };
+    const codes = Array.from({ length: 25 }, (_, i) => String(400 + i));
+    expect(validateProviderForm({ ...form, drop_codes: codes.join(' , ') }, 'edit').drop_codes).toBeUndefined();
+    expect(validateProviderForm({ ...form, drop_codes: [...codes, '500'].join(',') }, 'edit').drop_codes).toBe(
+      'Use 100 characters or fewer for status codes.',
+    );
+  });
 });
 
 describe('dropSummary (D-01)', () => {

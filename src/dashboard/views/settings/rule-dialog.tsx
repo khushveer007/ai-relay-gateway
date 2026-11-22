@@ -122,7 +122,7 @@ export function RuleDialog({ open, onOpenChange, mode, rule, providers, actions 
         <Field
           label="HTTP statuses"
           htmlFor={ID.status}
-          helper="Blank matches any status. Separate with commas or spaces. Ranges like 500-503 work."
+          helper="Blank matches any status. Separate with commas or spaces. Ranges like 500-503 work. Limit 100 characters after spacing is normalized."
           error={shown.status_codes ?? shown.rule}
         >
           <Input

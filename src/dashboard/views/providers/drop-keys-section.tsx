@@ -31,7 +31,7 @@ export function DropKeysSection({ form, onChange, errors, onCodesBlur }: DropKey
         label="HTTP status codes"
         htmlFor="drop_codes"
         error={errors.drop_codes}
-        helper="Separate with commas or spaces. Ranges like 500-503 work."
+        helper="Separate with commas or spaces. Ranges like 500-503 work. Limit 100 characters after spacing is normalized."
       >
         <Input
           id="drop_codes"

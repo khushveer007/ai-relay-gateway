@@ -95,6 +95,14 @@ describe('validateRuleForm', () => {
     }
   });
 
+  it('rejects an overlong code list after normalization', () => {
+    const codes = Array.from({ length: 25 }, (_, i) => String(100 + i));
+    expect(validateRuleForm(form({ status_codes: codes.join(' , ') })).status_codes).toBeUndefined();
+    expect(validateRuleForm(form({ status_codes: [...codes, '402'].join(',') })).status_codes).toBe(
+      'Use 100 characters or fewer for status codes.',
+    );
+  });
+
   it('checks the priority range', () => {
     for (const bad of ['-1', '100001', '', 'x']) {
       expect(validateRuleForm(form({ status_codes: '402', priority: bad })).priority).toBe('Enter a priority from 0 to 100000.');
