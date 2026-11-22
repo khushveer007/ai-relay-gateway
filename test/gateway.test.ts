@@ -1404,5 +1404,31 @@ describe('Full Proxy Failover & Admin Integration', () => {
         expect(json.message).not.toMatch(/^(EXHAUSTED|INVALID_KEY|RATE_LIMITED|UPSTREAM_ERROR|CLIENT_ERROR)/);
       });
     });
+
+    describe('DROP-04 providers list carries the drop record', () => {
+      it('GET /providers returns status_code and never key_enc (DROP-04)', async () => {
+        // Key 101 was dropped with HTTP 403; key 102 has no drop record (a key dropped before this phase, status_code null).
+        mockKeys[0].status = 'invalid';
+        mockKeys[0].status_code = 403;
+        mockKeys[0].status_reason = 'HTTP 403: forbidden';
+        mockKeys[1].status_code = null;
+        const cookie = await adminCookie();
+        const res = await worker.fetch(
+          new Request('https://gw.test/api/admin/providers', { method: 'GET', headers: { cookie } }),
+          env,
+          makeCtx().ctx,
+        );
+        expect(res.status).toBe(200);
+        const text = await res.text();
+        expect(text).not.toContain('key_enc');
+        const json = JSON.parse(text) as { providers: Array<{ id: number; keys: Array<Record<string, unknown>> }> };
+        const provA = json.providers.find((p) => p.id === 1)!;
+        const dropped = provA.keys.find((k) => k.id === 101)!;
+        const oldKey = provA.keys.find((k) => k.id === 102)!;
+        expect(dropped).toMatchObject({ status: 'invalid', status_code: 403, status_reason: 'HTTP 403: forbidden' });
+        expect(oldKey.status_code).toBeNull();
+        for (const p of json.providers) for (const k of p.keys) expect(Object.keys(k)).not.toContain('key_enc');
+      });
+    });
   });
 });

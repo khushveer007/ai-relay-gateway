@@ -13,6 +13,35 @@ import worker from '../src/worker/index';
 type Row = Record<string, unknown>;
 type TestProxy = Awaited<ReturnType<typeof getPlatformProxy<Env>>>;
 
+// The classify cases use these rules rather than the 0001 seed rows, which this harness does not insert. They copy
+// the default invalid-token rule (body regex, any status) and the global 401 rule, so the rules match production.
+const DROP_RULES: ErrorRule[] = [
+  {
+    id: 3,
+    provider_id: null,
+    priority: 30,
+    status_codes: '',
+    body_regex: 'invalid[_ ]?(api[_ ]?key|token)|incorrect api key|无效的令牌',
+    action: 'INVALID_KEY',
+    cooldown_s: null,
+    note: 'Invalid key text',
+    enabled: true,
+    origin: 'rule',
+  },
+  {
+    id: 5,
+    provider_id: null,
+    priority: 40,
+    status_codes: '401',
+    body_regex: null,
+    action: 'INVALID_KEY',
+    cooldown_s: null,
+    note: '401',
+    enabled: true,
+    origin: 'rule',
+  },
+];
+
 // Fixed instants, so every drop, cooldown and re-enable in this file is written against the same clock.
 const NOW = Date.UTC(2026, 10, 22, 9, 0, 0);
 const T_FIRST = NOW - 60_000;
@@ -227,6 +256,173 @@ describe('DROP-01 request-path guard (real local D1)', () => {
 
     await applyKeyPatch(env, stale, invalidPatch('HTTP 403: second reason'), T_SECOND);
     expect(await rowOf(id)).toEqual(afterFirst);
+  });
+
+  it('first drop wins keeps the status code too', async () => {
+    const id = await seedKey({ status: 'active' });
+    const stale = await keyOf(id); // read before any drop
+
+    const first = patchForAction(provider, 'INVALID_KEY', 'HTTP 403: first', null, 403, T_FIRST)!;
+    await applyKeyPatch(env, await keyOf(id), first, T_FIRST);
+    const afterFirst = await rowOf(id);
+    expect(afterFirst).toMatchObject({ status: 'invalid', status_reason: 'HTTP 403: first', status_code: 403, status_changed_at: T_FIRST });
+
+    // A later drop with another code, through a stale active copy: it must not change code, reason or time.
+    const second = patchForAction(provider, 'INVALID_KEY', 'HTTP 429: second', null, 429, T_SECOND)!;
+    await applyKeyPatch(env, stale, second, T_SECOND);
+    expect(await rowOf(id)).toEqual(afterFirst);
+  });
+
+  it('Re-enable clears the drop record and a later drop records its own code', async () => {
+    const id = await seedKey({ status: 'active' });
+    await applyKeyPatch(env, await keyOf(id), patchForAction(provider, 'INVALID_KEY', 'HTTP 403: forbidden', null, 403, T_FIRST)!, T_FIRST);
+    expect(await rowOf(id)).toMatchObject({ status: 'invalid', status_code: 403 });
+
+    // Forced ACTIVE_PATCH is the explicit Re-enable: it clears the code together with the reason.
+    await applyKeyPatch(env, await keyOf(id), ACTIVE_PATCH, T_SECOND, true);
+    expect(await rowOf(id)).toMatchObject({ status: 'active', status_code: null, status_reason: null });
+
+    // A later drop after Re-enable records its own code.
+    await applyKeyPatch(env, await keyOf(id), patchForAction(provider, 'INVALID_KEY', 'HTTP 418: teapot', null, 418, NOW)!, NOW);
+    expect(await rowOf(id)).toMatchObject({ status: 'invalid', status_code: 418, status_reason: 'HTTP 418: teapot' });
+  });
+
+  it('a drop never stores 0: an INVALID_KEY with no relay status stores a null code', async () => {
+    // Status 0 means no HTTP answer (the cannot-decrypt path). The drop still happens, but the code stays null.
+    const id = await seedKey({ status: 'active' });
+    const patch = patchForAction(provider, 'INVALID_KEY', 'cannot decrypt key (ENCRYPTION_KEY changed?)', null, 0, NOW)!;
+    expect(patch.status_code).toBeNull();
+    await applyKeyPatch(env, await keyOf(id), patch, NOW);
+    const row = await rowOf(id);
+    expect(row).toMatchObject({ status: 'invalid', status_code: null });
+    expect(row.status_code).not.toBe(0);
+  });
+
+  it('a key dropped before this phase reads back with no code', async () => {
+    // Legacy row 900 was dropped by 0001 rules before migration 0002, so its status_code is NULL.
+    const cfgKey = parseKey(await rowOf(900));
+    expect(cfgKey).toMatchObject({ status: 'invalid', status_reason: 'HTTP 401: legacy bad key', status_code: null });
+    expect(cfgKey.status_changed_at).toBe(Date.UTC(2026, 10, 1));
+  });
+
+  it('a relay answer with an empty body drops with a readable reason', async () => {
+    const id = await seedKey({ status: 'active' });
+    const cls = classify(DROP_RULES, provider.id, 401, '', null);
+    expect(cls).toMatchObject({ action: 'INVALID_KEY', reason: 'empty response body' });
+    const patch = patchForAction(provider, cls.action, cls.reason, cls.cooldownS, 401, NOW)!;
+    await applyKeyPatch(env, await keyOf(id), patch, NOW);
+    expect(parseKey(await rowOf(id))).toMatchObject({ status: 'invalid', status_reason: 'empty response body', status_code: 401 });
+  });
+
+  it('a drop from an error inside a 200 reply stores 200', async () => {
+    const id = await seedKey({ status: 'active' });
+    const body = '{"error":{"message":"invalid_api_key: the token is bad"}}';
+    const cls = classify(DROP_RULES, provider.id, 200, body, null);
+    expect(cls.action).toBe('INVALID_KEY');
+    const patch = patchForAction(provider, cls.action, cls.reason, cls.cooldownS, 200, NOW)!;
+    expect(patch.status_code).toBe(200);
+    await applyKeyPatch(env, await keyOf(id), patch, NOW);
+    expect(parseKey(await rowOf(id))).toMatchObject({ status: 'invalid', status_code: 200 });
+  });
+
+  it('a non-ASCII message round-trips and a long one is cut at 300 characters', async () => {
+    const idCn = await seedKey({ status: 'active' });
+    await applyKeyPatch(env, await keyOf(idCn), patchForAction(provider, 'INVALID_KEY', '余额不足', null, 401, NOW)!, NOW);
+    expect((await rowOf(idCn)).status_reason).toBe('余额不足');
+    expect(parseKey(await rowOf(idCn)).status_reason).toBe('余额不足');
+
+    const idLong = await seedKey({ status: 'active' });
+    const long = 'x'.repeat(400);
+    await applyKeyPatch(env, await keyOf(idLong), patchForAction(provider, 'INVALID_KEY', long, null, 401, NOW)!, NOW);
+    const stored = (await rowOf(idLong)).status_reason as string;
+    expect(stored).toHaveLength(300);
+    expect(stored).toBe(long.slice(0, 300));
+  });
+
+  it('admin Disable keeps the first drop code, reason and time, on a stale active read and on an already dropped row', async () => {
+    const ctx = { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
+    const adminEnv = { ...env, ADMIN_PASSWORD: 'pw-code-race', SESSION_SECRET: 'sess-code-race' };
+    const login = await worker.fetch(
+      new Request('https://gw.test/api/admin/login', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ password: 'pw-code-race' }),
+      }),
+      adminEnv,
+      ctx,
+    );
+    const cookie = login.headers.get('set-cookie')!.split(';')[0];
+
+    // Case 1: the row is already dropped with HTTP 403 when Disable arrives.
+    const alreadyDropped = await seedKey({ status: 'active' });
+    await db
+      .prepare("UPDATE provider_keys SET status = 'invalid', status_reason = 'HTTP 403: first reason', status_code = 403, status_changed_at = ? WHERE id = ?")
+      .bind(T_FIRST, alreadyDropped)
+      .run();
+    const droppedSnapshot = await rowOf(alreadyDropped);
+    const disable1 = await worker.fetch(
+      new Request(`https://gw.test/api/admin/keys/${alreadyDropped}`, {
+        method: 'PUT',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify({ status: 'disabled' }),
+      }),
+      adminEnv,
+      ctx,
+    );
+    expect(disable1.status).toBe(200);
+    expect(await rowOf(alreadyDropped)).toEqual(droppedSnapshot);
+
+    // Case 2: Disable reads an active row, a 403 drop commits after that read, and Disable must not overwrite it.
+    const raced = await seedKey({ status: 'active' });
+    const staleActive = await rowOf(raced);
+    let served = false;
+    const staleDb = new Proxy(db, {
+      get(target, prop) {
+        if (prop === 'prepare') {
+          return (sql: string) => {
+            const stmt = target.prepare(sql);
+            if (!served && sql.includes('SELECT * FROM provider_keys WHERE id')) {
+              served = true;
+              return { bind: () => ({ first: async () => staleActive }) } as unknown as D1PreparedStatement;
+            }
+            return stmt;
+          };
+        }
+        const value = Reflect.get(target, prop, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as unknown as D1Database;
+    await db
+      .prepare("UPDATE provider_keys SET status = 'invalid', status_reason = 'HTTP 403: winning drop', status_code = 403, status_changed_at = ? WHERE id = ?")
+      .bind(T_SECOND, raced)
+      .run();
+    const racedSnapshot = await rowOf(raced);
+    const disable2 = await worker.fetch(
+      new Request(`https://gw.test/api/admin/keys/${raced}`, {
+        method: 'PUT',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify({ status: 'disabled' }),
+      }),
+      { ...adminEnv, DB: staleDb },
+      ctx,
+    );
+    expect(disable2.status).toBe(200);
+    expect(served).toBe(true);
+    expect(await rowOf(raced)).toEqual(racedSnapshot);
+    expect((await rowOf(raced)).status_code).toBe(403);
+
+    // Explicit Re-enable through the same route clears the code and the reason.
+    const reenable = await worker.fetch(
+      new Request(`https://gw.test/api/admin/keys/${raced}`, {
+        method: 'PUT',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify({ status: 'active' }),
+      }),
+      adminEnv,
+      ctx,
+    );
+    expect(reenable.status).toBe(200);
+    expect(await rowOf(raced)).toMatchObject({ status: 'active', status_code: null, status_reason: null });
   });
 
   // DROP-02: cron, recheck and balance refresh never touch a dropped key. Run against real D1 so the SQL
