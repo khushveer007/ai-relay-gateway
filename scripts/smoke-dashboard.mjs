@@ -16,7 +16,7 @@
 import { ok } from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -115,14 +115,14 @@ async function healthy() {
   }
 }
 
-async function ensureServer() {
+async function ensureServer(reusePassword) {
   if (await healthy()) {
     if (CHECK_MOBILE) throw new Error('The mobile audit requires a Worker started by this script. Stop the Worker on port 8787 and retry.');
     if (process.env.SMOKE_ALLOW_REUSE !== '1') {
       throw new Error('A Worker is already answering on port 8787. Stop it or set SMOKE_ALLOW_REUSE=1 for a disposable local Worker.');
     }
     console.log(`Using the Worker already running at ${BASE} (SMOKE_ALLOW_REUSE=1)`);
-    return;
+    return reusePassword;
   }
   console.log('No Worker on 127.0.0.1:8787, applying local migrations and starting wrangler dev...');
   persistence = mkdtempSync(join(tmpdir(), 'gw-smoke-d1-'));
@@ -130,7 +130,15 @@ async function ensureServer() {
   const mig = spawnSync('npm', ['run', 'db:migrate:local', '--', ...persistArgs], { stdio: 'ignore', timeout: 120_000 });
   if (mig.status !== 0) throw new Error('Local D1 migrations did not succeed.');
 
-  child = spawn('npx', ['--no-install', 'wrangler', 'dev', '--local', '--ip', '127.0.0.1', '--port', '8787', ...persistArgs], {
+  // A per-run login and signing key bind all fixture mutations to this managed Worker.
+  const password = crypto.randomUUID();
+  const envFile = join(persistence, 'smoke.env');
+  writeFileSync(envFile, [
+    `ADMIN_PASSWORD=${password}`,
+    `SESSION_SECRET=${crypto.randomUUID()}`,
+    `ENCRYPTION_KEY=${crypto.randomUUID()}`,
+  ].join('\n'), { mode: 0o600 });
+  child = spawn('npx', ['--no-install', 'wrangler', 'dev', '--local', '--ip', '127.0.0.1', '--port', '8787', '--env-file', envFile, ...persistArgs], {
     stdio: 'ignore',
     detached: true,
   });
@@ -140,7 +148,7 @@ async function ensureServer() {
   while (Date.now() < deadline) {
     if (startError) throw startError;
     if (child.exitCode !== null || child.signalCode !== null) throw new Error('wrangler dev exited before answering /api/health.');
-    if (await healthy()) return;
+    if (await healthy()) return password;
     await sleep(500);
   }
   throw new Error('wrangler dev did not answer /api/health within 90 s.');
@@ -846,7 +854,7 @@ async function checkMobile(cookie) {
 
 async function main() {
   const vars = readDevVars();
-  await ensureServer();
+  const password = await ensureServer(vars.ADMIN_PASSWORD);
 
   // 1. Dashboard shell served by Workers Static Assets.
   const index = await fetch(`${BASE}/`);
@@ -885,7 +893,7 @@ async function main() {
   const login = await fetch(`${BASE}/api/admin/login`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ password: vars.ADMIN_PASSWORD }),
+    body: JSON.stringify({ password }),
   });
   await login.arrayBuffer();
   const setCookie = login.headers.getSetCookie?.() ?? [];
@@ -903,11 +911,13 @@ async function main() {
     cookieLine ? `status ${login.status}, attributes: ${cookieLine.split(';').slice(1).map((s) => s.trim().split('=')[0]).join(', ')}` : `status ${login.status}, no gw_session cookie`,
   );
   const cookie = cookieLine.split(';')[0];
+  ok(cookieOk, 'Worker did not authenticate this run. Stopping before fixture changes.');
 
   // 7. Session probe with the cookie.
   const session = await fetch(`${BASE}/api/admin/session`, { headers: { cookie } });
   await session.arrayBuffer();
   report(session.status === 200, 'check 7: GET /api/admin/session with the cookie is 200', `status ${session.status}`);
+  ok(session.status === 200, 'Worker did not recognize the session. Stopping before fixture changes.');
 
   // 8. Stats data path.
   const stats = await fetch(`${BASE}/api/admin/stats?range=24h`, { headers: { cookie } });
