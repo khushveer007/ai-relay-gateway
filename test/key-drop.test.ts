@@ -814,3 +814,110 @@ describe('drop list classification (real local D1)', () => {
   });
 });
 
+
+// D-04 (plan 03-03 Task 2): one batch writes the provider, its keys, its default-route link, its drop rule and the
+// version, so a failed rule INSERT leaves none of them and does not bump config_version. Real D1, real batch.
+describe('provider create is atomic with its drop rule (real local D1)', () => {
+  let proxy: TestProxy;
+  let db: D1Database;
+
+  beforeAll(async () => {
+    proxy = await getPlatformProxy<Env>({ persist: false });
+    db = proxy.env.DB;
+    const ddls = migration.match(/CREATE TABLE [\s\S]*?\n\);/g) ?? [];
+    for (const ddl of ddls) await db.prepare(ddl.replace(/--.*$/gm, '')).run();
+    const statements = dropMigration
+      .replace(/--.*$/gm, '')
+      .split(';')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    for (const stmt of statements) await db.prepare(stmt).run();
+    await db.prepare("INSERT INTO settings (key, value) VALUES ('config_version', '1')").run();
+    // A default route, so the create path has a link to write in the same batch.
+    await db.prepare("INSERT INTO routes (id, name, model_patterns, is_default, position) VALUES (1, 'default', '[]', 1, 0)").run();
+  }, 60_000);
+
+  afterAll(async () => {
+    invalidateConfig();
+    await proxy?.dispose();
+  });
+
+  const ctx = { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
+
+  async function cookieFor(adminEnv: Env): Promise<string> {
+    const login = await worker.fetch(
+      new Request('https://gw.test/api/admin/login', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ password: adminEnv.ADMIN_PASSWORD }),
+      }),
+      adminEnv,
+      ctx,
+    );
+    return login.headers.get('set-cookie')!.split(';')[0];
+  }
+
+  async function count(sql: string, ...args: unknown[]): Promise<number> {
+    const row = await db.prepare(sql).bind(...args).first<{ n: number }>();
+    return Number(row?.n ?? 0);
+  }
+
+  it('a drop-rule insert failure rolls back the provider, its keys, the route link and the version (D-04)', async () => {
+    const adminEnv = { ...proxy.env, ADMIN_PASSWORD: 'pw-create-rollback', SESSION_SECRET: 'sess-create-rollback' };
+    const cookie = await cookieFor(adminEnv);
+    const name = 'Rollback Relay';
+    const beforeVersion = await count("SELECT CAST(value AS INTEGER) AS n FROM settings WHERE key = 'config_version'");
+    const beforeRules = await count("SELECT COUNT(*) AS n FROM error_rules WHERE origin = 'drop_list'");
+
+    // Force the generated drop rule insert to fail. The trigger is test-only and is dropped in the cleanup below.
+    await db
+      .prepare("CREATE TRIGGER fail_drop_rule BEFORE INSERT ON error_rules WHEN NEW.origin = 'drop_list' BEGIN SELECT RAISE(ABORT, 'drop rule refused'); END")
+      .run();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    try {
+      const failed = await worker.fetch(
+        new Request('https://gw.test/api/admin/providers', {
+          method: 'POST',
+          headers: { cookie, 'content-type': 'application/json' },
+          body: JSON.stringify({ name, base_url: 'https://rollback.example', keys: 'sk-rollback-1', drop_codes: '403' }),
+        }),
+        adminEnv,
+        ctx,
+      );
+      expect(failed.status).toBe(500);
+      expect(await count('SELECT COUNT(*) AS n FROM providers WHERE name = ?', name)).toBe(0);
+      expect(await count('SELECT COUNT(*) AS n FROM provider_keys')).toBe(0);
+      expect(await count('SELECT COUNT(*) AS n FROM route_providers')).toBe(0);
+      expect(await count("SELECT COUNT(*) AS n FROM error_rules WHERE origin = 'drop_list'")).toBe(beforeRules);
+      expect(await count("SELECT CAST(value AS INTEGER) AS n FROM settings WHERE key = 'config_version'")).toBe(beforeVersion);
+      // The failed save never reached the models fetch.
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      await db.prepare('DROP TRIGGER fail_drop_rule').run();
+      fetchSpy.mockRestore();
+    }
+
+    // The same name saves successfully once the fault is removed: the provider, the key, the route link and the rule.
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response('{"data":[{"id":"m1"}]}', { status: 200, headers: { 'content-type': 'application/json' } }),
+    );
+    try {
+      const ok = await worker.fetch(
+        new Request('https://gw.test/api/admin/providers', {
+          method: 'POST',
+          headers: { cookie, 'content-type': 'application/json' },
+          body: JSON.stringify({ name, base_url: 'https://rollback.example', keys: 'sk-rollback-1', drop_codes: '403' }),
+        }),
+        adminEnv,
+        ctx,
+      );
+      expect(ok.status).toBe(201);
+      const body = (await ok.json()) as { id: number };
+      expect(await count('SELECT COUNT(*) AS n FROM provider_keys WHERE provider_id = ?', body.id)).toBe(1);
+      expect(await count('SELECT COUNT(*) AS n FROM route_providers WHERE provider_id = ?', body.id)).toBe(1);
+      expect(await count("SELECT COUNT(*) AS n FROM error_rules WHERE provider_id = ? AND origin = 'drop_list' AND status_codes = '403'", body.id)).toBe(1);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+});

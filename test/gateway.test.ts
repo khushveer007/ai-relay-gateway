@@ -301,6 +301,7 @@ describe('Full Proxy Failover & Admin Integration', () => {
   let keyUpdateCodes: Array<number | null>;
   let providerInserts: unknown[][];
   let providerUpdates: unknown[][];
+  let ruleWrites: Array<{ sql: string; bound: unknown[] }>;
   let env: Env;
 
   beforeEach(async () => {
@@ -311,6 +312,7 @@ describe('Full Proxy Failover & Admin Integration', () => {
     keyUpdateCodes = [];
     providerInserts = [];
     providerUpdates = [];
+    ruleWrites = [];
 
     const k1Enc = await encrypt('sk-provA-key1', ENC_SECRET);
     const k2Enc = await encrypt('sk-provA-key2', ENC_SECRET);
@@ -410,6 +412,9 @@ describe('Full Proxy Failover & Admin Integration', () => {
             keyUpdates.push({ id: Number(bound[6]), status: String(bound[0]), reason: bound[1] as string | null });
             keyUpdateCodes.push(bound[2] as number | null);
             keyUpdateSql.push(sql);
+          } else if (/(INSERT INTO|UPDATE|DELETE FROM) error_rules/.test(sql)) {
+            // Rule writes, including the drop-list DELETE and INSERT, are recorded with their binds.
+            ruleWrites.push({ sql, bound });
           } else if (sql.startsWith('UPDATE providers SET')) {
             providerUpdates.push(bound);
           } else if (sql.startsWith('INSERT INTO providers')) {
@@ -433,6 +438,10 @@ describe('Full Proxy Failover & Admin Integration', () => {
           if (sql.includes("key = 'config_version'")) return { value: '1' };
           if (sql.includes('FROM provider_keys WHERE id')) return mockKeys.find((k) => k.id === bound[0]) ?? null;
           if (sql.includes('SELECT * FROM providers WHERE id')) return mockProviders.find((p) => p.id === bound[0]) ?? null;
+          if (sql.includes('SELECT origin FROM error_rules WHERE id')) {
+            const rule = mockRules.find((r) => r.id === bound[0]);
+            return rule ? { origin: rule.origin ?? 'rule' } : null;
+          }
           return null;
         },
       };
@@ -444,7 +453,7 @@ describe('Full Proxy Failover & Admin Integration', () => {
       async batch(stmts: any[]) {
         const out = [];
         for (const s of stmts) {
-          if (s.sql.includes('UPDATE') || s.sql.includes('INSERT')) {
+          if (/UPDATE|INSERT|DELETE/.test(s.sql)) {
             out.push(await s.run());
           } else {
             out.push(await s.all());
@@ -1430,5 +1439,146 @@ describe('Full Proxy Failover & Admin Integration', () => {
         for (const p of json.providers) for (const k of p.keys) expect(Object.keys(k)).not.toContain('key_enc');
       });
     });
+
+    // DROP-06, D-04, DROP-07 at the route layer: drop-list fields on provider writes, and the Rules endpoints refuse
+    // a drop-list row (plan 03-03 Task 2). Every write is checked against the fake D1, with no real engine.
+    describe('DROP-06 provider drop list routes (plan 03-03)', () => {
+      const adminJson = async (cookie: string, method: string, path: string, payload: unknown): Promise<Response> =>
+        worker.fetch(
+          new Request(`https://gw.test/api/admin${path}`, {
+            method,
+            headers: { cookie, 'content-type': 'application/json' },
+            body: JSON.stringify(payload),
+          }),
+          env,
+          makeCtx().ctx,
+        );
+
+      it('a create with drop_codes and drop_message writes its rule with the provider id in one batch (DROP-07, D-06)', async () => {
+        const cookie = await adminCookie();
+        const res = await adminJson(cookie, 'POST', '/providers', {
+          name: 'Drop Relay',
+          base_url: 'https://drop-relay.test',
+          keys: [],
+          drop_codes: '403 418',
+          drop_message: 'quota (soon).',
+        });
+        expect(res.status).toBe(201);
+        const insert = ruleWrites.find((w) => /INSERT INTO error_rules/.test(w.sql));
+        expect(insert).toBeDefined();
+        expect(insert!.sql).toContain("'drop_list'");
+        expect(insert!.bound).toContain(-1);
+        expect(insert!.bound).toContain('403,418');
+        expect(insert!.bound).toContain('quota \\(soon\\)\\.');
+        expect(insert!.bound).toContain('quota (soon).');
+      });
+
+      it('a create with an invalid drop_codes answers 400 and writes no provider or rule', async () => {
+        const cookie = await adminCookie();
+        for (const drop_codes of ['abc', '200', '503-500']) {
+          const res = await adminJson(cookie, 'POST', '/providers', { name: `Bad ${drop_codes}`, base_url: 'https://bad.test', keys: [], drop_codes });
+          expect(res.status).toBe(400);
+        }
+        expect(providerInserts).toEqual([]);
+        expect(ruleWrites).toEqual([]);
+      });
+
+      it('a message with no codes answers 400 and writes nothing (DROP-06 empty)', async () => {
+        const cookie = await adminCookie();
+        const res = await adminJson(cookie, 'POST', '/providers', { name: 'Msg Only', base_url: 'https://msg.test', keys: [], drop_message: 'quota' });
+        expect(res.status).toBe(400);
+        expect(await res.json()).toMatchObject({ error: 'Add a status code to use this message.' });
+        expect(providerInserts).toEqual([]);
+        expect(ruleWrites).toEqual([]);
+      });
+
+      it('a create with neither drop field writes no error rule at all', async () => {
+        const cookie = await adminCookie();
+        const res = await adminJson(cookie, 'POST', '/providers', { name: 'Plain Relay', base_url: 'https://plain.test', keys: [] });
+        expect(res.status).toBe(201);
+        expect(ruleWrites).toEqual([]);
+      });
+
+      it('PUT with only the basic fields leaves the drop-list row alone (DROP-06)', async () => {
+        const cookie = await adminCookie();
+        const res = await adminJson(cookie, 'PUT', '/providers/1', { name: 'ProviderA', base_url: 'https://prov-a.test' });
+        expect(res.status).toBe(200);
+        expect(providerUpdates).toHaveLength(1);
+        expect(ruleWrites).toEqual([]);
+      });
+
+      it('PUT with blank drop fields deletes the drop-list row and inserts none (DROP-06 empty)', async () => {
+        const cookie = await adminCookie();
+        const res = await adminJson(cookie, 'PUT', '/providers/1', { drop_codes: '', drop_message: '' });
+        expect(res.status).toBe(200);
+        expect(ruleWrites).toHaveLength(1);
+        expect(ruleWrites[0].sql).toMatch(/^DELETE FROM error_rules WHERE provider_id = \? AND origin = 'drop_list'/);
+        expect(ruleWrites[0].sql).not.toMatch(/INSERT/);
+      });
+
+      it('PUT with codes writes the UPDATE, DELETE and INSERT in one batch (DROP-07)', async () => {
+        const cookie = await adminCookie();
+        const res = await adminJson(cookie, 'PUT', '/providers/1', { drop_codes: '403, 418', drop_message: '' });
+        expect(res.status).toBe(200);
+        expect(providerUpdates).toHaveLength(0);
+        expect(ruleWrites.map((w) => (w.sql.startsWith('DELETE') ? 'DELETE' : 'INSERT'))).toEqual(['DELETE', 'INSERT']);
+        expect(ruleWrites[1].bound).toContain('403,418');
+      });
+
+      it('GET /providers shows the drop list on its provider and empty strings on a provider without one (DROP-06)', async () => {
+        mockRules.push({
+          id: 50,
+          provider_id: 1,
+          priority: -1,
+          status_codes: '403,418',
+          body_regex: 'quota',
+          action: 'INVALID_KEY',
+          cooldown_s: null,
+          note: 'quota',
+          enabled: 1,
+          origin: 'drop_list',
+        });
+        const cookie = await adminCookie();
+        const res = await worker.fetch(
+          new Request('https://gw.test/api/admin/providers', { method: 'GET', headers: { cookie } }),
+          env,
+          makeCtx().ctx,
+        );
+        const json = (await res.json()) as { providers: Array<{ id: number; drop_codes: string; drop_message: string }> };
+        expect(json.providers.find((p) => p.id === 1)).toMatchObject({ drop_codes: '403,418', drop_message: 'quota' });
+        expect(json.providers.find((p) => p.id === 2)).toMatchObject({ drop_codes: '', drop_message: '' });
+      });
+
+      it('PUT and DELETE on a drop-list rule answer 409 and write nothing (T-03-13)', async () => {
+        mockRules.push({
+          id: 50,
+          provider_id: 1,
+          priority: -1,
+          status_codes: '403,418',
+          body_regex: null,
+          action: 'INVALID_KEY',
+          cooldown_s: null,
+          note: null,
+          enabled: 1,
+          origin: 'drop_list',
+        });
+        const cookie = await adminCookie();
+        const put = await adminJson(cookie, 'PUT', '/rules/50', { action: 'INVALID_KEY', status_codes: '401', priority: 5 });
+        expect(put.status).toBe(409);
+        expect(await put.json()).toMatchObject({ error: "This rule comes from a provider's drop list. Edit it in the provider." });
+        const del = await adminJson(cookie, 'DELETE', '/rules/50', {});
+        expect(del.status).toBe(409);
+        expect(ruleWrites).toEqual([]);
+      });
+
+      it('a normal rule keeps the same behavior, with spaces typed between its codes stored as commas (DROP-06)', async () => {
+        const cookie = await adminCookie();
+        const res = await adminJson(cookie, 'PUT', '/rules/2', { action: 'EXHAUSTED', status_codes: '401 403', priority: 20 });
+        expect(res.status).toBe(200);
+        expect(ruleWrites).toHaveLength(1);
+        expect(ruleWrites[0].bound).toContain('401,403');
+      });
+    });
   });
 });
+
