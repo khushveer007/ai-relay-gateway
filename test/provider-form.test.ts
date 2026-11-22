@@ -203,6 +203,15 @@ describe('globalDropNote (D-03)', () => {
       'Every provider already drops a key on 400-402, 401, 403. A code you add here is checked first.',
     );
   });
+
+  it('describes global rules with both status and message as conditional', () => {
+    const conditionalRule = { ...codeRule, status_codes: '403', body_regex: 'quota' };
+    const conditionalNote = 'Some global rules drop a key only when both the status code and error message match.';
+    expect(globalDropNote([conditionalRule])).toBe(`${conditionalNote} A code you add here is checked first.`);
+    expect(globalDropNote([codeRule, conditionalRule])).toBe(
+      `Every provider already drops a key on 401. ${conditionalNote} A code you add here is checked first.`,
+    );
+  });
 });
 
 it('D-07 a risky code never blocks Save', () => {

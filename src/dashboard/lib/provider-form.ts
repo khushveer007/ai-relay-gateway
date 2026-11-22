@@ -269,19 +269,28 @@ interface GlobalDropRule {
 export function globalDropNote(rules: readonly GlobalDropRule[]): string {
   const codes = new Set<string>();
   let hasMessage = false;
+  let hasConditional = false;
   for (const rule of rules) {
     if (rule.provider_id !== null || rule.action !== 'INVALID_KEY' || !rule.enabled) continue;
-    for (const code of normalizeCodes(rule.status_codes).split(',')) {
+    const statusCodes = normalizeCodes(rule.status_codes);
+    if (rule.body_regex) {
+      if (statusCodes) hasConditional = true;
+      else hasMessage = true;
+      continue;
+    }
+    for (const code of statusCodes.split(',')) {
       if (code) codes.add(code);
     }
-    if (rule.body_regex) hasMessage = true;
   }
 
-  if (!codes.size && !hasMessage) return 'No global rule drops a key. Only this list does.';
   const sorted = [...codes].sort((a, b) => Number(a.split('-')[0]) - Number(b.split('-')[0]));
   const codeList = sorted.join(', ');
   const matches = hasMessage ? [codeList, 'some error messages'].filter(Boolean).join(', and on ') : codeList;
-  return `Every provider already drops a key on ${matches}. A code you add here is checked first.`;
+  const notes = [];
+  if (matches) notes.push(`Every provider already drops a key on ${matches}.`);
+  if (hasConditional) notes.push('Some global rules drop a key only when both the status code and error message match.');
+  if (notes.length === 0) return 'No global rule drops a key. Only this list does.';
+  return [...notes, 'A code you add here is checked first.'].join(' ');
 }
 
 const inRange = (text: string, min: number, max: number): boolean => {
