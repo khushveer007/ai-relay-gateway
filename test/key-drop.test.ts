@@ -812,6 +812,29 @@ describe('drop list classification (real local D1)', () => {
     const cfg = await loadConfig(db);
     expect(classify(cfg.rules, dropProvider.id, 400, '{"error":"余额不足，请充值"}', null)).toMatchObject({ action: 'INVALID_KEY' });
   });
+
+  it('matches the decoded error message within the match limit, independently of the displayed reason', async () => {
+    const phrase = 'Quota "weekly" (soon).';
+    await db.batch(dropListStmts(db, dropProvider.id, parseDropList('403', phrase)));
+    const cfg = await loadConfig(db);
+    const response = (message: string) => JSON.stringify({ error: { message } });
+    const padding = 'x'.repeat(350);
+    expect(classify(cfg.rules, dropProvider.id, 403, response(padding + phrase.toUpperCase())))
+      .toMatchObject({ action: 'INVALID_KEY', reason: padding.slice(0, 300) });
+    expect(classify(cfg.rules, dropProvider.id, 403, response('x'.repeat(16384) + phrase)).action).toBe('RATE_LIMITED');
+    expect(classify(cfg.rules, dropProvider.id, 403, response(phrase.replace('.', '!'))).action).toBe('RATE_LIMITED');
+    expect(classify(cfg.rules, dropProvider.id, 200, response(phrase)).ruleId).toBeNull();
+    expect(classify(cfg.rules, dropProvider.id, 0, phrase)).toMatchObject({ action: 'UPSTREAM_ERROR', ruleId: null, reason: phrase });
+
+    const drop = cfg.rules.find((r) => r.provider_id === dropProvider.id && r.origin === 'drop_list')!;
+    const dropRule: ErrorRule = { ...drop, body_regex: 'Only in metadata' };
+    const rawRule: ErrorRule = { ...dropRule, origin: 'rule', id: drop.id + 1 };
+    for (const error of [undefined, { message: 'Forbidden' }]) {
+      const metadata = JSON.stringify({ error, metadata: 'Only in metadata' });
+      expect(classify([dropRule, rawRule], dropProvider.id, 403, metadata).ruleId).toBe(rawRule.id);
+    }
+  });
+
 });
 
 
