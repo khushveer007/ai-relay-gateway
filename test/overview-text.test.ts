@@ -159,6 +159,17 @@ describe('keyTestToast (DROP-10, E8)', () => {
     });
   });
 
+  it('uses plain action names in HTTP reasons and fallback messages', () => {
+    const action = 'Drop key until I re-enable it';
+    expect(keyTestToast(fail('invalid', 403, 'INVALID_KEY')).text).toBe(
+      `Still failing: HTTP 403 ${action}. Still dropped.`,
+    );
+    expect(keyTestToast(fail('disabled', 0, undefined, 'INVALID_KEY')).text).toBe(
+      `Still failing: ${action}. Still disabled.`,
+    );
+    expect(keyTestToast(fail('active', 0, undefined, 'INVALID_KEY')).text).toBe(`${action} (412 ms)`);
+  });
+
   it('keeps the plain message for any other key status', () => {
     expect(keyTestToast(ok('active'))).toEqual({ kind: 'success', text: 'Key works (412 ms)' });
     expect(keyTestToast(fail('exhausted', 402, 'no credit', 'No balance'))).toEqual({

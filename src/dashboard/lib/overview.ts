@@ -191,7 +191,7 @@ export function keyTestToast(res: KeyTestResultLike): { kind: 'success' | 'error
       return { kind, text: `Key works. Still ${still}. Press ${press} to use it. (${res.ms} ms)` };
     }
     const detail = res.status > 0 && res.cls?.reason ? `HTTP ${res.status} ${res.cls.reason}` : res.message;
-    return { kind, text: `Still failing: ${detail}. Still ${still}.` };
+    return { kind, text: `Still failing: ${plainActionText(detail)}. Still ${still}.` };
   }
-  return { kind, text: `${res.message} (${res.ms} ms)` };
+  return { kind, text: `${plainActionText(res.message)} (${res.ms} ms)` };
 }
