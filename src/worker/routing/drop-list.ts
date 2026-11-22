@@ -57,27 +57,29 @@ export function parseDropList(codes: unknown, message: unknown): DropList {
 }
 
 /**
- * The statements that save a provider's drop list. An untouched list returns nothing. A touched list deletes the
- * provider's drop-list row, then inserts one row when codes are present. Create passes the provider name, and the
- * insert finds the new provider id with a bound subquery inside the same batch.
+ * Save in the provider's batch, preserving the rule ID until the operator clears the list.
+ * Create passes the provider name so the insert can find the new provider ID in the same batch.
  */
 export function dropListStmts(db: D1Database, providerRef: number | string, dl: DropList): D1PreparedStatement[] {
   if (!dl.touched) return [];
   const isName = typeof providerRef === 'string';
-  const stmts: D1PreparedStatement[] = [];
-  const providerSql = isName ? '(SELECT id FROM providers WHERE name = ?)' : '?';
-  if (!isName) {
-    stmts.push(db.prepare("DELETE FROM error_rules WHERE provider_id = ? AND origin = 'drop_list'").bind(providerRef));
+  if (dl.codes === '') {
+    return isName ? [] : [db.prepare("DELETE FROM error_rules WHERE provider_id = ? AND origin = 'drop_list'").bind(providerRef)];
   }
-  if (dl.codes !== '') {
-    stmts.push(
-      db
-        .prepare(
-          `INSERT INTO error_rules (provider_id, priority, status_codes, body_regex, action, cooldown_s, note, enabled, origin)
-           VALUES (${providerSql}, ?, ?, ?, 'INVALID_KEY', NULL, ?, 1, 'drop_list')`,
-        )
-        .bind(providerRef, DROP_LIST_PRIORITY, dl.codes, dl.message === null ? null : escapeLiteral(dl.message), dl.message),
-    );
-  }
-  return stmts;
+  const pattern = dl.message === null ? null : escapeLiteral(dl.message);
+  const providerSql = isName ? '(SELECT id FROM providers WHERE name = ?1)' : '?1';
+  const insert = db
+    .prepare(
+      `INSERT INTO error_rules (provider_id, priority, status_codes, body_regex, action, cooldown_s, note, enabled, origin)
+       SELECT ${providerSql}, ?2, ?3, ?4, 'INVALID_KEY', NULL, ?5, 1, 'drop_list'
+       ${isName ? '' : "WHERE NOT EXISTS (SELECT 1 FROM error_rules WHERE provider_id = ?1 AND origin = 'drop_list')"}`,
+    )
+    .bind(providerRef, DROP_LIST_PRIORITY, dl.codes, pattern, dl.message);
+  if (isName) return [insert];
+  return [
+    db
+      .prepare("UPDATE error_rules SET status_codes = ?, body_regex = ?, note = ? WHERE provider_id = ? AND origin = 'drop_list'")
+      .bind(dl.codes, pattern, dl.message, providerRef),
+    insert,
+  ];
 }

@@ -415,7 +415,7 @@ describe('Full Proxy Failover & Admin Integration', () => {
             keyUpdateCodes.push(bound[2] as number | null);
             keyUpdateSql.push(sql);
           } else if (/(INSERT INTO|UPDATE|DELETE FROM) error_rules/.test(sql)) {
-            // Rule writes, including the drop-list DELETE and INSERT, are recorded with their binds.
+            // Record the rule writes and their binds for the provider save assertions.
             ruleWrites.push({ sql, bound });
           } else if (sql.startsWith('UPDATE providers SET')) {
             providerUpdates.push(bound);
@@ -1519,15 +1519,15 @@ describe('Full Proxy Failover & Admin Integration', () => {
         expect(ruleWrites[0].sql).not.toMatch(/INSERT/);
       });
 
-      it('PUT with codes writes the UPDATE, DELETE and INSERT in one batch (DROP-07)', async () => {
+      it('PUT with codes writes the provider and upserts the rule in one batch (DROP-07)', async () => {
         const cookie = await adminCookie();
         const res = await adminJson(cookie, 'PUT', '/providers/1', { drop_codes: '403, 418', drop_message: '' });
         expect(res.status).toBe(200);
-        // The provider UPDATE and the rule DELETE and INSERT all belong to the one save (DROP-07).
         expect(providerUpdates).toHaveLength(1);
-        expect(ruleWrites.map((w) => (w.sql.startsWith('DELETE') ? 'DELETE' : 'INSERT'))).toEqual(['DELETE', 'INSERT']);
+        expect(ruleWrites.map((w) => w.sql.split(' ')[0])).toEqual(['UPDATE', 'INSERT']);
+        expect(ruleWrites[0].bound).toContain('403,418');
         expect(ruleWrites[1].bound).toContain('403,418');
-        // One batch: the UPDATE, the DELETE, the INSERT and the version bump. A second batch would make this 2 or more.
+        expect(ruleWrites[1].sql).toContain('WHERE NOT EXISTS');
         expect(batchSizes).toEqual([4]);
       });
 

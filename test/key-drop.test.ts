@@ -800,6 +800,22 @@ describe('drop list classification (real local D1)', () => {
     expect((await loadConfig(db)).rules.some((r) => r.origin === 'drop_list' && r.provider_id === dropProvider.id)).toBe(false);
   });
 
+  it('concurrent saves create one generated rule and later edits preserve its ID', async () => {
+    const save = (codes: string, message?: string) => db.batch(dropListStmts(db, dropProvider.id, parseDropList(codes, message)));
+    const generated = async () => (await loadConfig(db)).rules.filter((r) => r.provider_id === dropProvider.id && r.origin === 'drop_list');
+    await save('');
+    await Promise.all([save('403'), save('403')]);
+    const rules = await generated();
+    expect(rules).toHaveLength(1);
+    const [initial] = rules;
+    await save('418', 'only this message');
+    expect(await generated()).toEqual([
+      { ...initial, status_codes: '418', body_regex: 'only this message', note: 'only this message' },
+    ]);
+    await save('');
+    expect(await generated()).toEqual([]);
+  });
+
   it('DROP-06 encoding: a message with metacharacters matches itself literally, case-insensitively, and not looser text', async () => {
     await db.batch(dropListStmts(db, dropProvider.id, parseDropList('429', 'quota (soon).')));
     const cfg = await loadConfig(db);
