@@ -1,10 +1,19 @@
-// Pure form model for the add-provider dialog. It has no imports at all and no DOM: the Worker
-// tsconfig type-checks every file a test imports, and './api' needs DOM types the Worker lacks.
+// Pure form model for the provider dialog. The Worker tsconfig type-checks test imports, so this
+// module imports only pure helpers. The API client needs DOM types the Worker lacks.
+
+import {
+  DROP_CODE_ERRORS,
+  DROP_MESSAGE_NEEDS_CODES,
+  STATUS_CODES_LENGTH_ERROR,
+  STATUS_CODES_MAX_CHARS,
+  normalizeCodes,
+  parseStatusCodes,
+} from './status-codes';
 
 /** Canonical wire-format order. The payload always lists formats in this order (PRV-02 ordering). */
 export const PROVIDER_FORMATS = ['anthropic', 'openai-chat', 'openai-responses'] as const;
 
-/** Same union as `Format` in lib/api.ts, kept here so this file stays import-free. */
+/** Same wire formats as the API client. */
 export type ProviderFormat = (typeof PROVIDER_FORMATS)[number];
 
 export type KeyStrategy = 'sequential' | 'round_robin';
@@ -31,6 +40,8 @@ export interface ProviderForm {
   extra_headers: string;
   parse_usage: boolean;
   enabled: boolean;
+  drop_codes: string;
+  drop_message: string;
   add_to_default: boolean;
 }
 
@@ -57,6 +68,8 @@ export function emptyProviderForm(): ProviderForm {
     extra_headers: '',
     parse_usage: true,
     enabled: true,
+    drop_codes: '',
+    drop_message: '',
     add_to_default: true,
   };
 }
@@ -136,11 +149,12 @@ const orNull = (s: string): string | null => (s.trim() ? s.trim() : null);
 const numOr = (text: string, fallback: number): number => (text.trim() === '' ? fallback : Number(text));
 
 /**
- * The create and edit payload. Edit sends exactly the 17 editable fields and nothing else, custom balance
- * fields included even when the mode is not custom, so nothing hidden is wiped (D-15). Formats are sent in canonical order whatever order they were ticked in, blank
- * optional text sends null, blank maps send {}, and keys travel as the raw text the Worker splits.
+ * Edit sends all 19 editable fields, including the drop list and hidden balance fields (D-15).
+ * Formats use canonical order. Blank drop fields travel as empty strings, other optional text as
+ * null, and blank maps as {}. Keys travel as the raw text the Worker splits.
  */
 export function buildProviderPayload(form: ProviderForm, mode: FormMode): Record<string, unknown> {
+  const drop = parseStatusCodes(form.drop_codes);
   const payload: Record<string, unknown> = {
     name: form.name.trim(),
     base_url: form.base_url.trim(),
@@ -159,6 +173,8 @@ export function buildProviderPayload(form: ProviderForm, mode: FormMode): Record
     extra_headers: linesToMap(form.extra_headers).map,
     parse_usage: form.parse_usage,
     enabled: form.enabled,
+    drop_codes: drop.error ? form.drop_codes.trim() : drop.codes,
+    drop_message: form.drop_message.trim(),
   };
   if (mode === 'create') {
     payload.keys = form.keys;
@@ -167,7 +183,7 @@ export function buildProviderPayload(form: ProviderForm, mode: FormMode): Record
   return payload;
 }
 
-export type FormErrorKey = 'name' | 'base_url' | 'formats' | 'timeout_ms' | 'recheck_hours' | 'balance_divisor' | 'model_map' | 'extra_headers';
+export type FormErrorKey = 'name' | 'base_url' | 'drop_codes' | 'formats' | 'timeout_ms' | 'recheck_hours' | 'balance_divisor' | 'model_map' | 'extra_headers';
 export type FormErrors = Partial<Record<FormErrorKey, string>>;
 
 /** An HTTP header name (RFC 9110 token); the Worker applies the same rule to `extra_headers`. */
@@ -203,6 +219,8 @@ export interface ProviderDtoLike {
   extra_headers: Record<string, string>;
   parse_usage: boolean;
   enabled: boolean;
+  drop_codes: string;
+  drop_message: string;
 }
 
 /**
@@ -230,12 +248,57 @@ export function providerToForm(dto: ProviderDtoLike): ProviderForm {
     extra_headers: mapToLines(dto.extra_headers),
     parse_usage: dto.parse_usage,
     enabled: dto.enabled,
+    drop_codes: dto.drop_codes ?? '',
+    drop_message: dto.drop_message ?? '',
     add_to_default: true,
   };
 }
 
 /** Field names that live inside the collapsed Advanced section; the dialog opens it for these. */
 export const ADVANCED_FIELDS: readonly FormErrorKey[] = ['formats', 'timeout_ms', 'recheck_hours', 'balance_divisor', 'model_map', 'extra_headers'];
+export const DROP_FIELDS: readonly FormErrorKey[] = ['drop_codes'];
+
+export function dropSummary(form: Pick<ProviderForm, 'drop_codes' | 'drop_message'>): string {
+  const codes = normalizeCodes(form.drop_codes);
+  if (!codes) return '';
+  const message = form.drop_message.trim();
+  return `Drops on ${codes.split(',').join(', ')}${message ? ` · message contains “${message}”` : ''}`;
+}
+
+interface GlobalDropRule {
+  provider_id: number | null;
+  action: string;
+  enabled: boolean;
+  status_codes: string;
+  body_regex: string | null;
+}
+
+export function globalDropNote(rules: readonly GlobalDropRule[]): string {
+  const codes = new Set<string>();
+  let hasMessage = false;
+  let hasConditional = false;
+  for (const rule of rules) {
+    if (rule.provider_id !== null || rule.action !== 'INVALID_KEY' || !rule.enabled) continue;
+    const statusCodes = normalizeCodes(rule.status_codes);
+    if (rule.body_regex) {
+      if (statusCodes) hasConditional = true;
+      else hasMessage = true;
+      continue;
+    }
+    for (const code of statusCodes.split(',')) {
+      if (code) codes.add(code);
+    }
+  }
+
+  const sorted = [...codes].sort((a, b) => Number(a.split('-')[0]) - Number(b.split('-')[0]));
+  const codeList = sorted.join(', ');
+  const matches = hasMessage ? [codeList, 'some error messages'].filter(Boolean).join(', and on ') : codeList;
+  const notes = [];
+  if (matches) notes.push(`Every provider already drops a key on ${matches}.`);
+  if (hasConditional) notes.push('Some global rules drop a key only when both the status code and error message match.');
+  if (notes.length === 0) return 'No global rule drops a key. Only this list does.';
+  return [...notes, 'A code you add here is checked first.'].join(' ');
+}
 
 const inRange = (text: string, min: number, max: number): boolean => {
   if (text.trim() === '') return true; // blank means the default
@@ -244,13 +307,17 @@ const inRange = (text: string, min: number, max: number): boolean => {
 };
 
 /**
- * Inline errors, keyed by the field's name so the dialog can open Advanced and focus it. The ranges
+ * Inline errors, keyed by field name so the dialog can open its section and focus it. The ranges
  * mirror the Worker's for a quicker answer only; the Worker still validates every value.
  */
 export function validateProviderForm(form: ProviderForm, _mode: FormMode): FormErrors {
   const errors: FormErrors = {};
   if (!form.name.trim()) errors.name = 'Enter a name.';
   if (!isHttpUrl(form.base_url)) errors.base_url = URL_MESSAGE;
+  const drop = parseStatusCodes(form.drop_codes);
+  if (drop.error) errors.drop_codes = DROP_CODE_ERRORS[drop.error];
+  else if (drop.codes.length > STATUS_CODES_MAX_CHARS) errors.drop_codes = STATUS_CODES_LENGTH_ERROR;
+  else if (!drop.codes && form.drop_message.trim()) errors.drop_codes = DROP_MESSAGE_NEEDS_CODES;
   if (form.formats.length === 0) errors.formats = 'Pick at least one format.';
   if (!inRange(form.timeout_ms, 1000, 300000)) errors.timeout_ms = 'Enter a timeout between 1000 and 300000 ms.';
   if (!inRange(form.recheck_hours, 0.25, 720)) errors.recheck_hours = 'Enter hours between 0.25 and 720.';

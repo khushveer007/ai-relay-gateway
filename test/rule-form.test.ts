@@ -4,12 +4,15 @@ import {
   buildSettingsPayload,
   buildTesterPayload,
   emptyRuleForm,
+  ruleMatchLabel,
+  ruleSentence,
   ruleToForm,
   settingsToForm,
   validateRuleForm,
   validateSettings,
   validateTester,
   type RuleForm,
+  type RuleDtoLike,
 } from '../src/dashboard/lib/rule-form';
 
 // One line per value so a failing assertion prints on a single line (keeps a TDD RED report valid TAP).
@@ -83,13 +86,21 @@ describe('validateRuleForm', () => {
     expect(validateRuleForm(form({ body_regex: 'quota' })).rule).toBeUndefined();
   });
 
-  it('checks status codes after removing spaces', () => {
-    for (const ok of ['402', '401,403', '500-599', ' 401 , 403 ']) {
+  it('checks status codes separated by spaces or commas across the ordinary rule range', () => {
+    for (const ok of ['402', '401,403', '500-599', ' 401 , 403 ', '401 403', '100-999']) {
       expect(validateRuleForm(form({ status_codes: ok })).status_codes).toBeUndefined();
     }
-    for (const bad of ['40', '4xx', '402,', '500-59']) {
+    for (const bad of ['40', '4xx', '402,', '500-59', '503-500', '099']) {
       expect(validateRuleForm(form({ status_codes: bad })).status_codes).toBe('Use a code like 402, 401,403 or 500-599.');
     }
+  });
+
+  it('rejects an overlong code list after normalization', () => {
+    const codes = Array.from({ length: 25 }, (_, i) => String(100 + i));
+    expect(validateRuleForm(form({ status_codes: codes.join(' , ') })).status_codes).toBeUndefined();
+    expect(validateRuleForm(form({ status_codes: [...codes, '402'].join(',') })).status_codes).toBe(
+      'Use 100 characters or fewer for status codes.',
+    );
   });
 
   it('checks the priority range', () => {
@@ -123,7 +134,7 @@ describe('buildRulePayload', () => {
   });
 
   it('blank regex and note send null and status codes are sent without spaces', () => {
-    const p = buildRulePayload(form({ status_codes: ' 401 , 403 ', body_regex: '  ', note: '' }));
+    const p = buildRulePayload(form({ status_codes: ' 401 403 ', body_regex: '  ', note: '' }));
     expect(j([p.status_codes, p.body_regex, p.note])).toBe(j(['401,403', null, null]));
   });
 
@@ -155,6 +166,54 @@ describe('ruleToForm', () => {
     const f = ruleToForm({ id: 1, provider_id: null, priority: 25, status_codes: '', body_regex: null, action: 'EXHAUSTED', cooldown_s: null, note: null, enabled: true });
     expect(j([f.provider_id, f.cooldown_s, f.body_regex, f.note, f.status_codes])).toBe(j(['', '60', '', '', '']));
   });
+});
+
+const savedRule: RuleDtoLike = {
+  id: 3,
+  provider_id: null,
+  priority: 25,
+  status_codes: '',
+  body_regex: 'quota.*',
+  action: 'INVALID_KEY',
+  cooldown_s: null,
+  note: 'review monthly',
+  enabled: true,
+};
+const providers = [{ id: 4, name: 'Relay' }];
+
+describe('ruleSentence', () => {
+  it('describes an older message-only rule with global scope', () => {
+    expect(ruleSentence(savedRule, providers)).toEqual({
+      scope: 'All providers',
+      sentence: 'On any status → Drop key until I re-enable it',
+      message: 'Message matches: quota.*',
+      note: 'review monthly',
+    });
+  });
+
+  it('explains how a paused key returns and names its scope', () => {
+    const rule = { ...savedRule, provider_id: 4, action: 'RATE_LIMITED', cooldown_s: 600, status_codes: '403' };
+    expect(ruleSentence(rule, providers)).toMatchObject({
+      scope: 'Relay',
+      sentence: 'On 403 → Pause key for 10 min, then use it again',
+    });
+    expect(ruleSentence({ ...rule, provider_id: 17 }, providers).scope).toBe('Provider #17');
+  });
+
+  it('reads a generated rule using its literal message once', () => {
+    expect(ruleSentence({ ...savedRule, provider_id: 4, origin: 'drop_list', status_codes: '403,418', note: 'quota (soon).' }, providers)).toEqual({
+      scope: "From Relay's drop list",
+      sentence: 'On 403,418 → Drop key until I re-enable it',
+      message: 'Message contains: quota (soon).',
+      note: null,
+    });
+  });
+});
+
+it('attributes generated, ordinary, missing and fallback rule results', () => {
+  const rules: RuleDtoLike[] = [{ ...savedRule, id: 7, provider_id: 4, origin: 'drop_list' }, savedRule];
+  const actual = [7, 3, 42, null].map((id) => ruleMatchLabel(id, rules, providers));
+  expect(actual).toEqual(["matched Relay's drop list", 'matched rule #3', 'matched rule #42', 'fallback rule']);
 });
 
 describe('buildTesterPayload', () => {

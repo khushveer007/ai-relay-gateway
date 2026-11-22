@@ -1,6 +1,7 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { api } from '@/lib/api';
+import { api, type KeyStatus } from '@/lib/api';
+import { keyTestToast, type KeyTestResultLike } from '@/lib/overview';
 
 /**
  * Enable a non-active key (PUT /keys/:id { status: 'active' }). Invalidates `['providers']` and
@@ -24,23 +25,24 @@ export function useEnableKey() {
   });
 }
 
-interface TestKeyResult {
-  ok: boolean;
-  message: string;
-  ms: number;
+interface TestKeyResult extends KeyTestResultLike {
+  /** The status the key had before the test. A dropped or disabled key is only reported on, never changed. */
+  key_status: KeyStatus;
+  cls?: { reason: string };
 }
 
 /**
- * Test a key (POST /keys/:id/test). The endpoint re-activates a non-active key on success today
- * (Phase 3 changes this under DROP-10), so the toast never claims the key's status is unchanged.
+ * Test a key (POST /keys/:id/test). The Worker reports on a dropped or disabled key without writing to it
+ * (DROP-10). For any other key it keeps the old behaviour, so a passing test can bring back a paused or
+ * out-of-balance key. The toast copy comes from `keyTestToast`, which never says a dropped key is back.
  */
 export function useTestKey() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (keyId: number) => api.post<TestKeyResult>(`/keys/${keyId}/test`),
     onSuccess: (res) => {
-      const text = `${res.message} (${res.ms} ms)`;
-      if (res.ok) toast.success(text);
+      const { kind, text } = keyTestToast(res);
+      if (kind === 'success') toast.success(text);
       else toast.error(text);
     },
     onError: (err: Error) => {

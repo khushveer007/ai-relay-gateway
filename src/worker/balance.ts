@@ -137,7 +137,7 @@ export async function testKey(env: Env, provider: Provider, key: ProviderKey, ru
     const ms = Date.now() - t0;
     if (res.ok && !looksLikeJsonError(text)) return { ok: true, status: res.status, ms, message: `OK (${model})` };
     const cls = classify(rules, provider.id, res.ok ? 200 : res.status, text, res.headers.get('retry-after'));
-    return { ok: false, status: res.status, ms, cls, message: `${cls.action}: ${cls.reason}` };
+    return { ok: false, status: res.status, ms, cls, message: `HTTP ${res.status}: ${cls.reason}` };
   } catch (e) {
     return { ok: false, status: 0, ms: Date.now() - t0, message: `network error: ${(e as Error).message}` };
   }

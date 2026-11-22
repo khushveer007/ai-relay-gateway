@@ -6,6 +6,9 @@ export const ALL_ACTIONS: Action[] = ['EXHAUSTED', 'INVALID_KEY', 'RATE_LIMITED'
 
 export type KeyStatus = 'active' | 'exhausted' | 'rate_limited' | 'invalid' | 'disabled';
 
+/** 'rule' is an ordinary error rule. 'drop_list' marks the per-provider drop-list row written by the dashboard. */
+export type RuleOrigin = 'rule' | 'drop_list';
+
 export interface Env {
   DB: D1Database;
   ASSETS?: Fetcher;
@@ -47,6 +50,8 @@ export interface ProviderKey {
   priority: number;
   status: KeyStatus;
   status_reason: string | null;
+  /** HTTP status the relay answered when the key was dropped; NULL for keys dropped before migration 0002. */
+  status_code: number | null;
   status_changed_at: number | null;
   cooldown_until: number | null;
   next_recheck_at: number | null;
@@ -74,6 +79,7 @@ export interface ErrorRule {
   cooldown_s: number | null;
   note: string | null;
   enabled: boolean;
+  origin: RuleOrigin;
 }
 
 export interface GatewayKey {

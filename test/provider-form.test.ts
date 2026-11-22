@@ -3,7 +3,9 @@ import type { ProviderDTO } from '../src/dashboard/lib/api';
 import {
   PROVIDER_FORMATS,
   buildProviderPayload,
+  dropSummary,
   emptyProviderForm,
+  globalDropNote,
   initialTestState,
   linesToMap,
   mapToLines,
@@ -53,7 +55,22 @@ describe('buildProviderPayload (PRV-01, PRV-02)', () => {
       extra_headers: {},
       parse_usage: true,
       enabled: true,
+      drop_codes: '',
+      drop_message: '',
     });
+  });
+
+  it('D-02 a new provider starts with empty drop fields', () => {
+    const form = emptyProviderForm();
+    expect(form.drop_codes).toBe('');
+    expect(form.drop_message).toBe('');
+  });
+
+  it.each(['create', 'edit'] as const)('D-04 normalizes codes and trims the message on %s', (mode) => {
+    const form = { ...emptyProviderForm(), drop_codes: '403 418', drop_message: '  quota (soon).  ' };
+    const payload = buildProviderPayload(form, mode);
+    expect(payload.drop_codes).toBe('403,418');
+    expect(payload.drop_message).toBe('quota (soon).');
   });
 
   it('a create with no keys sends an empty keys string', () => {
@@ -132,6 +149,84 @@ describe('validateProviderForm', () => {
   it('gives no errors for a valid form', () => {
     expect(validateProviderForm({ ...emptyProviderForm(), name: 'A', base_url: 'https://r.test' }, 'create')).toEqual({});
   });
+
+  it.each([
+    ['abc', '', 'Enter codes like 403, 418 or 500-503.'],
+    ['200', '', 'Use error codes from 400 to 599.'],
+    ['503-500', '', 'A range must go up, like 500-503.'],
+    ['', 'quota', 'Add a status code to use this message.'],
+    ['', '', undefined],
+  ] as const)('D-02 validates codes %j and message %j', (drop_codes, drop_message, expected) => {
+    const form = { ...emptyProviderForm(), drop_codes, drop_message };
+    expect(validateProviderForm(form, 'edit').drop_codes).toBe(expected);
+  });
+
+  it('rejects an overlong code list after normalization', () => {
+    const form = { ...emptyProviderForm(), name: 'A', base_url: 'https://r.test' };
+    const codes = Array.from({ length: 25 }, (_, i) => String(400 + i));
+    expect(validateProviderForm({ ...form, drop_codes: codes.join(' , ') }, 'edit').drop_codes).toBeUndefined();
+    expect(validateProviderForm({ ...form, drop_codes: [...codes, '500'].join(',') }, 'edit').drop_codes).toBe(
+      'Use 100 characters or fewer for status codes.',
+    );
+  });
+});
+
+describe('dropSummary (D-01)', () => {
+  it.each([
+    ['', '', ''],
+    ['', 'quota', ''],
+    ['403 418', '', 'Drops on 403, 418'],
+    ['403 418', ' quota ', 'Drops on 403, 418 · message contains “quota”'],
+  ])('summarizes codes %j and message %j', (drop_codes, drop_message, expected) => {
+    expect(dropSummary({ drop_codes, drop_message })).toBe(expected);
+  });
+});
+
+describe('globalDropNote (D-03)', () => {
+  const codeRule = { provider_id: null, action: 'INVALID_KEY', enabled: true, status_codes: '401', body_regex: null };
+  const messageRule = { ...codeRule, status_codes: '', body_regex: 'invalid key' };
+  const nonDropRules = [
+    { ...codeRule, status_codes: '402', action: 'EXHAUSTED' },
+    { ...codeRule, status_codes: '403', enabled: false },
+    { ...codeRule, status_codes: '404', provider_id: 1 },
+  ];
+
+  it('describes only enabled global drop rules', () => {
+    expect(globalDropNote([codeRule, messageRule, ...nonDropRules])).toBe(
+      'Every provider already drops a key on 401, and on some error messages. A code you add here is checked first.',
+    );
+    expect(globalDropNote(nonDropRules)).toBe('No global rule drops a key. Only this list does.');
+  });
+
+  it('describes codes and messages independently', () => {
+    expect(globalDropNote([codeRule])).toBe(
+      'Every provider already drops a key on 401. A code you add here is checked first.',
+    );
+    expect(globalDropNote([messageRule])).toBe(
+      'Every provider already drops a key on some error messages. A code you add here is checked first.',
+    );
+  });
+
+  it('deduplicates codes and sorts intact ranges by their start', () => {
+    expect(globalDropNote([{ ...codeRule, status_codes: '403,400-402,401' }, codeRule])).toBe(
+      'Every provider already drops a key on 400-402, 401, 403. A code you add here is checked first.',
+    );
+  });
+
+  it('describes global rules with both status and message as conditional', () => {
+    const conditionalRule = { ...codeRule, status_codes: '403', body_regex: 'quota' };
+    const conditionalNote = 'Some global rules drop a key only when both the status code and error message match.';
+    expect(globalDropNote([conditionalRule])).toBe(`${conditionalNote} A code you add here is checked first.`);
+    expect(globalDropNote([codeRule, conditionalRule])).toBe(
+      `Every provider already drops a key on 401. ${conditionalNote} A code you add here is checked first.`,
+    );
+  });
+});
+
+it('D-07 a risky code never blocks Save', () => {
+  const form = { ...emptyProviderForm(), name: 'Relay', base_url: 'https://r.test', drop_codes: '400, 429, 500-503' };
+  expect(validateProviderForm(form, 'edit')).toEqual({});
+  expect(buildProviderPayload(form, 'edit').drop_codes).toBe('400,429,500-503');
 });
 
 describe('testReducer (PRV-04 concurrency)', () => {
@@ -192,6 +287,8 @@ const NON_DEFAULT: ProviderDTO = {
   timeout_ms: 45000,
   extra_headers: { 'HTTP-Referer': 'https://example.com', 'X-Title': 'Gateway' },
   enabled: false,
+  drop_codes: '403,418',
+  drop_message: 'quota (soon).',
   created_at: 1,
   keys: [],
   routes: [],
@@ -219,6 +316,8 @@ function editableFields(dto: ProviderDTO) {
     extra_headers: dto.extra_headers,
     parse_usage: dto.parse_usage,
     enabled: dto.enabled,
+    drop_codes: dto.drop_codes,
+    drop_message: dto.drop_message,
   };
 }
 
@@ -252,7 +351,7 @@ describe('edit payload round trip (PRV-03, D-15)', () => {
     expect(canon(buildProviderPayload(providerToForm(NON_DEFAULT), 'edit'))).toBe(canon(editableFields(NON_DEFAULT)));
   });
 
-  it('changing only the name changes only the name', () => {
+  it('D-15 changing only the name keeps the codes and message', () => {
     const form = { ...providerToForm(NON_DEFAULT), name: 'Renamed' };
     expect(buildProviderPayload(form, 'edit')).toEqual({ ...editableFields(NON_DEFAULT), name: 'Renamed' });
   });
@@ -261,7 +360,7 @@ describe('edit payload round trip (PRV-03, D-15)', () => {
     const payload = buildProviderPayload(providerToForm(NON_DEFAULT), 'edit');
     expect(payload).not.toHaveProperty('keys');
     expect(payload).not.toHaveProperty('add_to_default');
-    expect(Object.keys(payload)).toHaveLength(17);
+    expect(Object.keys(payload)).toHaveLength(19);
   });
 
   it('blank numeric text falls back to 60000, 6 and 1', () => {

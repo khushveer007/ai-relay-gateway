@@ -49,9 +49,94 @@ export function fmtMs(v: number | null | undefined): string {
 }
 
 /**
- * The one place that names a rule or attempt action for the operator. The action badge and every
- * later place that shows an action call it, so Phase 3 (DROP-08) changes only this function (D-28).
+ * The one place that names an action for the operator (DROP-08, D-11). Every screen that shows an
+ * action calls this, so a raw code such as INVALID_KEY never reaches the screen. An unknown value comes
+ * back unchanged. `opts.cooldownS` fills in the minutes for RATE_LIMITED.
  */
-export function actionLabel(action: string): string {
-  return action;
+export function actionLabel(action: string, opts?: { cooldownS?: number | null }): string {
+  switch (action) {
+    case 'INVALID_KEY':
+      return 'Drop key until I re-enable it';
+    case 'RATE_LIMITED': {
+      const s = opts?.cooldownS;
+      return typeof s === 'number' && Number.isFinite(s) && s > 0 ? `Pause key for ${fmtCooldown(s)}` : 'Pause key for N min';
+    }
+    case 'EXHAUSTED':
+      return 'Mark out of balance (auto-recheck)';
+    case 'UPSTREAM_ERROR':
+      return 'Try next provider';
+    case 'CLIENT_ERROR':
+      return 'Return error to client';
+    case 'OK':
+      return 'OK';
+    default:
+      return action;
+  }
+}
+
+/** The "what happens to the key" caption for an action (D-11). Empty for an unknown action. */
+export function actionConsequence(action: string): string {
+  switch (action) {
+    case 'INVALID_KEY':
+      return 'Stays off. Requests and cron never use it until you press Re-enable.';
+    case 'RATE_LIMITED':
+      return 'Comes back by itself after that time, or after the time the provider asks for.';
+    case 'EXHAUSTED':
+      return "Rests, then is rechecked on the provider's recheck interval and comes back when it has balance.";
+    case 'UPSTREAM_ERROR':
+      return 'Not changed. The request moves on to the next provider.';
+    case 'CLIENT_ERROR':
+      return 'Not changed. The error goes back to the client, with no retry.';
+    default:
+      return '';
+  }
+}
+
+/** The operator word for a key status (DROP-05). An unknown status comes back unchanged. */
+export function keyStatusLabel(status: string): string {
+  switch (status) {
+    case 'active':
+      return 'Active';
+    case 'rate_limited':
+      return 'Paused';
+    case 'exhausted':
+      return 'Out of balance';
+    case 'invalid':
+      return 'Dropped';
+    case 'disabled':
+      return 'Disabled';
+    default:
+      return status;
+  }
+}
+
+/** The main and menu label that turns a non-active key back on (DROP-03): Re-enable for a dropped key. */
+export function enableLabel(status: string): string {
+  return status === 'invalid' ? 'Re-enable' : 'Enable';
+}
+
+/**
+ * A cooldown in words: "59 s" under a minute, then minutes to one decimal with a trailing ".0" removed
+ * ("1.5 min", "10 min"). A zero or negative value reads "0 s"; a non-finite value gives an empty string.
+ */
+export function fmtCooldown(seconds: number): string {
+  if (!Number.isFinite(seconds)) return '';
+  const s = Math.max(0, Math.round(seconds));
+  if (s < 60) return `${s} s`;
+  return `${(s / 60).toFixed(1).replace(/\.0$/, '')} min`;
+}
+
+/**
+ * Absolute local date and time, without a year: "18 Nov, 14:32". The locale is fixed to en-GB so the
+ * shape does not change with the browser language. The time zone is the viewer's own.
+ */
+export function fmtDateTime(ts: number): string {
+  return new Date(ts).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false });
+}
+
+const RAW_ACTION_CODE = /\b(INVALID_KEY|RATE_LIMITED|EXHAUSTED|UPSTREAM_ERROR|CLIENT_ERROR)\b/g;
+
+/** Free text from a relay or a log line, with each whole-word raw action code replaced by its plain name (D-13). */
+export function plainActionText(text: string): string {
+  return text.replace(RAW_ACTION_CODE, (code) => actionLabel(code));
 }

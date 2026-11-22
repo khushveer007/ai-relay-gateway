@@ -250,7 +250,9 @@ export async function handleProxy(req: Request, env: Env, ctx: ExecutionContext)
         log.provider_id = provider.id;
         log.key_id = key.id;
         log.upstream_model = upstreamModel;
-        if (key.status !== 'active') ctx.waitUntil(applyKeyPatch(env, key, ACTIVE_PATCH));
+        if (key.status !== 'active') {
+          ctx.waitUntil(applyKeyPatch(env, key, ACTIVE_PATCH).catch((error) => console.error('key state write failed', error)));
+        }
         return success;
       }
 
@@ -275,8 +277,10 @@ export async function handleProxy(req: Request, env: Env, ctx: ExecutionContext)
         case 'EXHAUSTED':
         case 'INVALID_KEY':
         case 'RATE_LIMITED': {
-          const patch = patchForAction(provider, f.cls.action, f.cls.reason, f.cls.cooldownS);
-          if (patch) ctx.waitUntil(applyKeyPatch(env, key, patch));
+          const patch = patchForAction(provider, f.cls.action, f.cls.reason, f.cls.cooldownS, f.status);
+          if (patch) {
+            ctx.waitUntil(applyKeyPatch(env, key, patch).catch((error) => console.error('key state write failed', error)));
+          }
           continue; // next key of the same provider
         }
         case 'UPSTREAM_ERROR':

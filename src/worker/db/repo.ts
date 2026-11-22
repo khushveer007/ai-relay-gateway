@@ -60,6 +60,7 @@ export function parseKey(r: Row): ProviderKey {
     priority: Number(r.priority ?? 0),
     status: (r.status as KeyStatus) ?? 'active',
     status_reason: str(r.status_reason),
+    status_code: num(r.status_code),
     status_changed_at: num(r.status_changed_at),
     cooldown_until: num(r.cooldown_until),
     next_recheck_at: num(r.next_recheck_at),
@@ -80,6 +81,7 @@ export function parseRule(r: Row): ErrorRule {
     cooldown_s: num(r.cooldown_s),
     note: str(r.note),
     enabled: Number(r.enabled) === 1,
+    origin: r.origin === 'drop_list' ? 'drop_list' : 'rule',
   };
 }
 
@@ -180,16 +182,26 @@ export function bumpVersionStmt(db: D1Database): D1PreparedStatement {
 export interface KeyStatePatch {
   status: KeyStatus;
   status_reason: string | null;
+  /** HTTP status stored with a drop (INVALID_KEY). Null for every other status. */
+  status_code: number | null;
   cooldown_until: number | null;
   next_recheck_at: number | null;
 }
 
-export function keyStateStmt(db: D1Database, keyId: number, patch: KeyStatePatch, now: number): D1PreparedStatement {
+/**
+ * Builds the key-state UPDATE. An unforced write (the proxy, cron, recheck, Test and admin Disable) adds a
+ * status guard to the WHERE clause that excludes the invalid and disabled statuses. D1 then refuses to move a
+ * dropped or disabled key even when the caller's cached copy still says active. The D1 row is the one source
+ * of truth across isolates (DROP-01). The guard adds no bind, so the bind order stays the same for both forms.
+ * Bind order: status, status_reason, status_code, cooldown_until, next_recheck_at, now, keyId.
+ */
+export function keyStateStmt(db: D1Database, keyId: number, patch: KeyStatePatch, now: number, force = false): D1PreparedStatement {
+  const guard = force ? '' : " AND status NOT IN ('invalid','disabled')";
   return db
     .prepare(
       `UPDATE provider_keys
-         SET status = ?, status_reason = ?, cooldown_until = ?, next_recheck_at = ?, status_changed_at = ?
-       WHERE id = ?`,
+         SET status = ?, status_reason = ?, status_code = ?, cooldown_until = ?, next_recheck_at = ?, status_changed_at = ?
+       WHERE id = ?${guard}`,
     )
-    .bind(patch.status, patch.status_reason, patch.cooldown_until, patch.next_recheck_at, now, keyId);
+    .bind(patch.status, patch.status_reason, patch.status_code, patch.cooldown_until, patch.next_recheck_at, now, keyId);
 }

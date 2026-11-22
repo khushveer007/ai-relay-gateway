@@ -10,6 +10,7 @@ export interface ProviderKeyDTO {
   priority: number;
   status: KeyStatus;
   status_reason: string | null;
+  status_code: number | null;
   status_changed_at: number | null;
   cooldown_until: number | null;
   next_recheck_at: number | null;
@@ -39,6 +40,8 @@ export interface ProviderDTO {
   timeout_ms: number;
   extra_headers: Record<string, string>;
   enabled: boolean;
+  drop_codes: string;
+  drop_message: string;
   created_at: number;
   keys: ProviderKeyDTO[];
   routes: string[];
@@ -63,6 +66,7 @@ export interface ErrorRuleDTO {
   cooldown_s: number | null;
   note: string | null;
   enabled: boolean;
+  origin?: 'rule' | 'drop_list';
 }
 
 export interface GatewayKeyDTO {

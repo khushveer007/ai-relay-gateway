@@ -19,15 +19,23 @@ export interface RecheckOutcome {
  *   1. balance endpoint (if the provider has one): balance > 0 → reactivate
  *   2. auto mode only: if no balance info, send a 1-token test request
  *   3. otherwise stay exhausted and schedule the next check
+ *
+ * The admin recheck endpoint can hand this function any key, so a key that is not exhausted (including a
+ * dropped `invalid` key) is skipped before any balance request or write (DROP-02). The direct UPDATEs below
+ * also filter on status, so a drop that lands during the balance request is not overwritten.
  */
 export async function recheckKey(env: Env, config: Config, provider: Provider, key: ProviderKey): Promise<RecheckOutcome> {
+  if (key.status !== 'exhausted') return { key_id: key.id, result: 'skipped', detail: 'key is ' + key.status };
+  const skipped: RecheckOutcome = { key_id: key.id, result: 'skipped', detail: 'Key state changed during recheck.' };
   const now = Date.now();
   const bal = await checkBalance(env, provider, key);
   if (bal.balance !== null) {
-    await env.DB.prepare('UPDATE provider_keys SET balance = ?, balance_checked_at = ? WHERE id = ?').bind(bal.balance, now, key.id).run();
+    await env.DB.prepare("UPDATE provider_keys SET balance = ?, balance_checked_at = ? WHERE id = ? AND status = 'exhausted'")
+      .bind(bal.balance, now, key.id)
+      .run();
   }
   if (bal.balance !== null && bal.balance > 0) {
-    await applyKeyPatch(env, key, ACTIVE_PATCH);
+    if (!(await applyKeyPatch(env, key, ACTIVE_PATCH))) return skipped;
     return { key_id: key.id, result: 'reactivated', detail: `balance ${bal.balance}` };
   }
 
@@ -35,22 +43,23 @@ export async function recheckKey(env: Env, config: Config, provider: Provider, k
   if (bal.balance === null && provider.recheck_mode === 'auto') {
     const t = await testKey(env, provider, key, config.rules);
     if (t.ok) {
-      await applyKeyPatch(env, key, ACTIVE_PATCH);
+      if (!(await applyKeyPatch(env, key, ACTIVE_PATCH))) return skipped;
       return { key_id: key.id, result: 'reactivated', detail: `test request ok (${t.ms} ms)` };
     }
     detail += `; test: ${t.message}`;
     if (t.cls && t.cls.action !== 'EXHAUSTED') {
-      const patch = patchForAction(provider, t.cls.action, t.cls.reason, t.cls.cooldownS, now);
+      const patch = patchForAction(provider, t.cls.action, t.cls.reason, t.cls.cooldownS, t.status, now);
       if (patch) {
-        await applyKeyPatch(env, key, patch);
+        if (!(await applyKeyPatch(env, key, patch))) return skipped;
         return { key_id: key.id, result: 'still_exhausted', detail };
       }
     }
   }
 
-  await env.DB.prepare('UPDATE provider_keys SET next_recheck_at = ? WHERE id = ?')
+  const scheduled = await env.DB.prepare("UPDATE provider_keys SET next_recheck_at = ? WHERE id = ? AND status = 'exhausted'")
     .bind(now + provider.recheck_hours * 3_600_000, key.id)
     .run();
+  if (scheduled.meta.changes === 0) return skipped;
   return { key_id: key.id, result: 'still_exhausted', detail };
 }
 
@@ -102,11 +111,14 @@ export async function runMaintenance(env: Env): Promise<{ cooldowns: number; rec
   let balances = 0;
   for (const [p, k] of stale.slice(0, MAX_BALANCE_REFRESH_PER_RUN)) {
     const bal = await checkBalance(env, p, k).catch(() => null);
-    // Record the attempt time even when unsupported so we don't retry every 15 min.
-    await env.DB.prepare('UPDATE provider_keys SET balance = COALESCE(?, balance), balance_checked_at = ? WHERE id = ?')
+    // Record the attempt time even when unsupported so we don't retry every 15 min. The status predicate means a
+    // key that dropped while its balance request was in flight keeps its whole row unchanged (DROP-02).
+    const written = await env.DB.prepare(
+      "UPDATE provider_keys SET balance = COALESCE(?, balance), balance_checked_at = ? WHERE id = ? AND status = 'active'",
+    )
       .bind(bal?.balance ?? null, now, k.id)
       .run();
-    balances++;
+    if ((written.meta.changes ?? 0) > 0) balances++;
   }
 
   invalidateConfig();

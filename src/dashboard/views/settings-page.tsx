@@ -65,7 +65,7 @@ export default function SettingsView() {
       <>
         <div className="grid gap-6 md:grid-cols-2">
           <SettingsFormCard settings={settings} />
-          <RuleTester providers={providers} />
+          <RuleTester providers={providers} rules={rules.rules} />
         </div>
         <RulesList rules={rules.rules} providers={providers} actions={rules.actions} />
       </>

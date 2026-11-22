@@ -22,7 +22,8 @@ import { resolveRoute } from '../src/worker/routing/resolve-route';
 import { isUsable, orderKeys } from '../src/worker/routing/select-key';
 import type { Config, Env, ErrorRule, GatewayKey, Provider, ProviderKey, Route } from '../src/worker/types';
 
-const DEFAULT_RULES: ErrorRule[] = [
+/** The default global rules without `origin`; DEFAULT_RULES maps them so the origin is set in one place. */
+const BASE_DEFAULT_RULES: Omit<ErrorRule, 'origin'>[] = [
   {
     id: 1,
     provider_id: null,
@@ -64,6 +65,7 @@ const DEFAULT_RULES: ErrorRule[] = [
   { id: 8, provider_id: null, priority: 70, status_codes: '408,500-599', body_regex: null, action: 'UPSTREAM_ERROR', cooldown_s: null, note: '5xx', enabled: true },
   { id: 9, provider_id: null, priority: 80, status_codes: '400-499', body_regex: null, action: 'CLIENT_ERROR', cooldown_s: null, note: '4xx', enabled: true },
 ];
+const DEFAULT_RULES: ErrorRule[] = BASE_DEFAULT_RULES.map((r) => ({ ...r, origin: 'rule' as const }));
 
 function makeProvider(overrides: Partial<Provider> = {}): Provider {
   return {
@@ -102,6 +104,7 @@ function makeKey(overrides: Partial<ProviderKey> = {}): ProviderKey {
     priority: 0,
     status: 'active',
     status_reason: null,
+    status_code: null,
     status_changed_at: null,
     cooldown_until: null,
     next_recheck_at: null,
@@ -165,6 +168,7 @@ describe('Error Classifier', () => {
       cooldown_s: null,
       note: 'Custom relay 400 exhausted',
       enabled: true,
+      origin: 'rule',
     };
     const rules = [providerRule, ...DEFAULT_RULES];
     expect(classify(rules, 7, 400, '{"error":"custom_relay_empty_wallet"}').action).toBe('EXHAUSTED');
@@ -293,16 +297,24 @@ describe('Full Proxy Failover & Admin Integration', () => {
   let mockSettings: Record<string, unknown>[];
   let insertedLogs: unknown[][];
   let keyUpdates: Array<{ id: number; status: string; reason: string | null }>;
+  let keyUpdateSql: string[];
+  let keyUpdateCodes: Array<number | null>;
   let providerInserts: unknown[][];
   let providerUpdates: unknown[][];
+  let ruleWrites: Array<{ sql: string; bound: unknown[] }>;
+  let batchSizes: number[];
   let env: Env;
 
   beforeEach(async () => {
     invalidateConfig();
     insertedLogs = [];
     keyUpdates = [];
+    keyUpdateSql = [];
+    keyUpdateCodes = [];
     providerInserts = [];
     providerUpdates = [];
+    ruleWrites = [];
+    batchSizes = [];
 
     const k1Enc = await encrypt('sk-provA-key1', ENC_SECRET);
     const k2Enc = await encrypt('sk-provA-key2', ENC_SECRET);
@@ -399,7 +411,12 @@ describe('Full Proxy Failover & Admin Integration', () => {
           if (sql.includes('INSERT INTO request_logs')) {
             insertedLogs.push(bound);
           } else if (sql.includes('UPDATE provider_keys')) {
-            keyUpdates.push({ id: Number(bound[5]), status: String(bound[0]), reason: bound[1] as string | null });
+            keyUpdates.push({ id: Number(bound[6]), status: String(bound[0]), reason: bound[1] as string | null });
+            keyUpdateCodes.push(bound[2] as number | null);
+            keyUpdateSql.push(sql);
+          } else if (/(INSERT INTO|UPDATE|DELETE FROM) error_rules/.test(sql)) {
+            // Record the rule writes and their binds for the provider save assertions.
+            ruleWrites.push({ sql, bound });
           } else if (sql.startsWith('UPDATE providers SET')) {
             providerUpdates.push(bound);
           } else if (sql.startsWith('INSERT INTO providers')) {
@@ -421,7 +438,12 @@ describe('Full Proxy Failover & Admin Integration', () => {
         },
         async first() {
           if (sql.includes("key = 'config_version'")) return { value: '1' };
+          if (sql.includes('FROM provider_keys WHERE id')) return mockKeys.find((k) => k.id === bound[0]) ?? null;
           if (sql.includes('SELECT * FROM providers WHERE id')) return mockProviders.find((p) => p.id === bound[0]) ?? null;
+          if (sql.includes('SELECT origin FROM error_rules WHERE id')) {
+            const rule = mockRules.find((r) => r.id === bound[0]);
+            return rule ? { origin: rule.origin ?? 'rule' } : null;
+          }
           return null;
         },
       };
@@ -432,8 +454,9 @@ describe('Full Proxy Failover & Admin Integration', () => {
       prepare: fakePrepare,
       async batch(stmts: any[]) {
         const out = [];
+        batchSizes.push(stmts.length);
         for (const s of stmts) {
-          if (s.sql.includes('UPDATE') || s.sql.includes('INSERT')) {
+          if (/UPDATE|INSERT|DELETE/.test(s.sql)) {
             out.push(await s.run());
           } else {
             out.push(await s.all());
@@ -469,6 +492,33 @@ describe('Full Proxy Failover & Admin Integration', () => {
       },
     };
   }
+
+  it('a 401 drops the key and records the status (DROP-04)', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+      const headers = new Headers(init?.headers);
+      if (headers.get('x-api-key') === 'sk-provA-key1') {
+        return new Response('{"error":{"message":"bad key"}}', { status: 401, headers: { 'content-type': 'application/json' } });
+      }
+      return new Response('{"id":"msg_1","content":[{"type":"text","text":"Hi"}],"usage":{"input_tokens":12,"output_tokens":4}}', {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+
+    const { ctx, flush } = makeCtx();
+    const req = new Request('https://gw.test/v1/messages', {
+      method: 'POST',
+      headers: { 'x-api-key': GW_TOKEN, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'claude-sonnet-4', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+
+    const res = await handleProxy(req, env, ctx);
+    await flush();
+
+    expect(res.status).toBe(200);
+    expect(keyUpdates).toEqual([{ id: 101, status: 'invalid', reason: 'bad key' }]);
+    expect(keyUpdateCodes).toEqual([401]);
+  });
 
   it('rotates from Key 1 (402 Exhausted) to Key 2 (200 OK) on the same provider', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
@@ -1178,6 +1228,362 @@ describe('Full Proxy Failover & Admin Integration', () => {
       );
       await c2.flush();
       expect(r2.status).toBe(402);
+    });
+
+    // DROP-01 (fake D1, same isolate): a request that is already in flight when a drop lands must not revive
+    // the key. The two requests share one cached key object, so the in-memory guard is what this proves.
+    it('a concurrent request that succeeds after the drop leaves the key dropped', async () => {
+      invalidateConfig();
+      let release!: () => void;
+      const held = new Promise<void>((r) => (release = r));
+      let calls = 0;
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+        calls++;
+        if (calls === 1) {
+          // Request 1 holds key 101 open until released.
+          await held;
+          return new Response('{"id":"msg_slow","content":[]}', { status: 200, headers: { 'content-type': 'application/json' } });
+        }
+        if (calls === 2) {
+          // Request 2 gets a 401 for key 101, so it drops the key.
+          expect(new Headers(init?.headers).get('x-api-key')).toBe('sk-provA-key1');
+          return new Response('{"error":{"message":"bad key"}}', { status: 401, headers: { 'content-type': 'application/json' } });
+        }
+        // Request 2 then succeeds on key 102.
+        return new Response('{"id":"msg_2","content":[]}', { status: 200, headers: { 'content-type': 'application/json' } });
+      });
+
+      const body = JSON.stringify({ model: 'claude-sonnet-4', messages: [{ role: 'user', content: 'hi' }] });
+      const first = makeCtx();
+      const p1 = handleProxy(
+        new Request('https://gw.test/v1/messages', { method: 'POST', headers: { 'x-api-key': GW_TOKEN, 'content-type': 'application/json' }, body }),
+        env,
+        first.ctx,
+      );
+      // Wait until request 1 has reached upstream and is parked on the held promise.
+      while (calls < 1) await new Promise((r) => setTimeout(r, 0));
+
+      const second = makeCtx();
+      const res2 = await handleProxy(
+        new Request('https://gw.test/v1/messages', { method: 'POST', headers: { 'x-api-key': GW_TOKEN, 'content-type': 'application/json' }, body }),
+        env,
+        second.ctx,
+      );
+      await second.flush();
+      expect(res2.status).toBe(200);
+      expect(res2.headers.get('x-gateway-attempts')).toBe('2');
+
+      release();
+      const res1 = await p1;
+      await first.flush();
+      expect(res1.status).toBe(200);
+      expect(keyUpdates).toEqual([{ id: 101, status: 'invalid', reason: 'bad key' }]);
+      expect(keyUpdates.some((u) => u.id === 101 && u.status === 'active')).toBe(false);
+    });
+
+    // DROP-03: only an explicit Re-enable (PUT status active) forces a dropped key back to active.
+    describe('DROP-03 admin Re-enable and Disable', () => {
+      const adminPut = async (cookie: string, path: string, payload: unknown): Promise<Response> =>
+        worker.fetch(
+          new Request(`https://gw.test/api/admin${path}`, {
+            method: 'PUT',
+            headers: { cookie, 'content-type': 'application/json' },
+            body: JSON.stringify(payload),
+          }),
+          env,
+          makeCtx().ctx,
+        );
+
+      it('PUT status active on an invalid key writes once, with no NOT IN guard in the SQL', async () => {
+        mockKeys[0].status = 'invalid';
+        mockKeys[0].status_reason = 'bad key';
+        const cookie = await adminCookie();
+        const res = await adminPut(cookie, '/keys/101', { status: 'active' });
+        expect(res.status).toBe(200);
+        expect(keyUpdates).toEqual([{ id: 101, status: 'active', reason: null }]);
+        expect(keyUpdateSql).toHaveLength(1);
+        expect(keyUpdateSql[0]).not.toContain("NOT IN ('invalid','disabled')");
+      });
+
+      it('PUT status disabled on an active key writes disabled through the guarded SQL', async () => {
+        const cookie = await adminCookie();
+        const res = await adminPut(cookie, '/keys/101', { status: 'disabled' });
+        expect(res.status).toBe(200);
+        expect(keyUpdates).toEqual([{ id: 101, status: 'disabled', reason: 'disabled manually' }]);
+        expect(keyUpdateSql[0]).toContain("NOT IN ('invalid','disabled')");
+      });
+
+      it('PUT status disabled on an invalid key answers 200 and records no key write', async () => {
+        mockKeys[0].status = 'invalid';
+        mockKeys[0].status_reason = 'bad key';
+        const cookie = await adminCookie();
+        const res = await adminPut(cookie, '/keys/101', { status: 'disabled' });
+        expect(res.status).toBe(200);
+        expect(keyUpdates).toEqual([]);
+      });
+
+      it('a request-path drop write carries the guard', async () => {
+        vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+          new Response('{"error":{"message":"bad key"}}', { status: 401, headers: { 'content-type': 'application/json' } }),
+        );
+        const { ctx, flush } = makeCtx();
+        await handleProxy(
+          new Request('https://gw.test/v1/messages', {
+            method: 'POST',
+            headers: { 'x-api-key': GW_TOKEN, 'content-type': 'application/json' },
+            body: JSON.stringify({ model: 'claude-sonnet-4', messages: [] }),
+          }),
+          env,
+          ctx,
+        );
+        await flush();
+        expect(keyUpdates.length).toBeGreaterThan(0);
+        expect(keyUpdateSql.every((s) => s.includes("NOT IN ('invalid','disabled')"))).toBe(true);
+      });
+    });
+
+    // DROP-10: Test on an invalid or disabled key reports the result and writes nothing.
+    describe('DROP-10 Test on a dropped or disabled key', () => {
+      const testKeyCall = async (cookie: string, id: number): Promise<Response> =>
+        worker.fetch(
+          new Request(`https://gw.test/api/admin/keys/${id}/test`, { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: '{}' }),
+          env,
+          makeCtx().ctx,
+        );
+
+      it('an invalid key with an upstream 200 answers ok with key_status invalid and records no key write', async () => {
+        mockKeys[0].status = 'invalid';
+        vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+          new Response('{"id":"msg_t","content":[]}', { status: 200, headers: { 'content-type': 'application/json' } }),
+        );
+        const cookie = await adminCookie();
+        const res = await testKeyCall(cookie, 101);
+        const json = (await res.json()) as { ok: boolean; key_status: string };
+        expect(json).toMatchObject({ ok: true, key_status: 'invalid' });
+        expect(keyUpdates).toEqual([]);
+      });
+
+      it('an invalid key with an upstream 429 records no key write', async () => {
+        mockKeys[0].status = 'invalid';
+        vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{"error":"slow"}', { status: 429 }));
+        const cookie = await adminCookie();
+        const res = await testKeyCall(cookie, 101);
+        expect(await res.json()).toMatchObject({ ok: false, key_status: 'invalid' });
+        expect(keyUpdates).toEqual([]);
+      });
+
+      it('a disabled key with an upstream 200 records no key write', async () => {
+        mockKeys[0].status = 'disabled';
+        vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+          new Response('{"id":"msg_t","content":[]}', { status: 200, headers: { 'content-type': 'application/json' } }),
+        );
+        const cookie = await adminCookie();
+        const res = await testKeyCall(cookie, 101);
+        expect(await res.json()).toMatchObject({ ok: true, key_status: 'disabled' });
+        expect(keyUpdates).toEqual([]);
+      });
+
+      it('an exhausted key with an upstream 200 is written back to active', async () => {
+        mockKeys[0].status = 'exhausted';
+        vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+          new Response('{"id":"msg_t","content":[]}', { status: 200, headers: { 'content-type': 'application/json' } }),
+        );
+        const cookie = await adminCookie();
+        const res = await testKeyCall(cookie, 101);
+        expect(await res.json()).toMatchObject({ ok: true, key_status: 'exhausted' });
+        expect(keyUpdates).toEqual([{ id: 101, status: 'active', reason: null }]);
+      });
+
+      it('an active key with an upstream 401 is written to invalid through the guarded SQL', async () => {
+        vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+          new Response('{"error":{"message":"bad key"}}', { status: 401, headers: { 'content-type': 'application/json' } }),
+        );
+        const cookie = await adminCookie();
+        const res = await testKeyCall(cookie, 101);
+        expect(await res.json()).toMatchObject({ ok: false, key_status: 'active' });
+        expect(keyUpdates).toEqual([{ id: 101, status: 'invalid', reason: 'bad key' }]);
+        expect(keyUpdateSql[0]).toContain("NOT IN ('invalid','disabled')");
+      });
+
+      it("a failing key test answers 'HTTP 401: {reason}' with no raw action code", async () => {
+        vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+          new Response('{"error":{"message":"bad key"}}', { status: 401, headers: { 'content-type': 'application/json' } }),
+        );
+        const cookie = await adminCookie();
+        const res = await testKeyCall(cookie, 101);
+        const json = (await res.json()) as { message: string };
+        expect(json.message).toBe('HTTP 401: bad key');
+        expect(json.message).not.toMatch(/^(EXHAUSTED|INVALID_KEY|RATE_LIMITED|UPSTREAM_ERROR|CLIENT_ERROR)/);
+      });
+    });
+
+    describe('DROP-04 providers list carries the drop record', () => {
+      it('GET /providers returns status_code and never key_enc (DROP-04)', async () => {
+        // Key 101 was dropped with HTTP 403; key 102 has no drop record (a key dropped before this phase, status_code null).
+        mockKeys[0].status = 'invalid';
+        mockKeys[0].status_code = 403;
+        mockKeys[0].status_reason = 'HTTP 403: forbidden';
+        mockKeys[1].status_code = null;
+        const cookie = await adminCookie();
+        const res = await worker.fetch(
+          new Request('https://gw.test/api/admin/providers', { method: 'GET', headers: { cookie } }),
+          env,
+          makeCtx().ctx,
+        );
+        expect(res.status).toBe(200);
+        const text = await res.text();
+        expect(text).not.toContain('key_enc');
+        const json = JSON.parse(text) as { providers: Array<{ id: number; keys: Array<Record<string, unknown>> }> };
+        const provA = json.providers.find((p) => p.id === 1)!;
+        const dropped = provA.keys.find((k) => k.id === 101)!;
+        const oldKey = provA.keys.find((k) => k.id === 102)!;
+        expect(dropped).toMatchObject({ status: 'invalid', status_code: 403, status_reason: 'HTTP 403: forbidden' });
+        expect(oldKey.status_code).toBeNull();
+        for (const p of json.providers) for (const k of p.keys) expect(Object.keys(k)).not.toContain('key_enc');
+      });
+    });
+
+    // DROP-06, D-04, DROP-07 at the route layer: drop-list fields on provider writes, and the Rules endpoints refuse
+    // a drop-list row (plan 03-03 Task 2). Every write is checked against the fake D1, with no real engine.
+    describe('DROP-06 provider drop list routes (plan 03-03)', () => {
+      const adminJson = async (cookie: string, method: string, path: string, payload: unknown): Promise<Response> =>
+        worker.fetch(
+          new Request(`https://gw.test/api/admin${path}`, {
+            method,
+            headers: { cookie, 'content-type': 'application/json' },
+            body: JSON.stringify(payload),
+          }),
+          env,
+          makeCtx().ctx,
+        );
+
+      it('a create with drop_codes and drop_message writes its rule with the provider id in one batch (DROP-07, D-06)', async () => {
+        const cookie = await adminCookie();
+        const res = await adminJson(cookie, 'POST', '/providers', {
+          name: 'Drop Relay',
+          base_url: 'https://drop-relay.test',
+          keys: [],
+          drop_codes: '403 418',
+          drop_message: 'quota (soon).',
+        });
+        expect(res.status).toBe(201);
+        const insert = ruleWrites.find((w) => /INSERT INTO error_rules/.test(w.sql));
+        expect(insert).toBeDefined();
+        expect(insert!.sql).toContain("'drop_list'");
+        expect(insert!.bound).toContain(-1);
+        expect(insert!.bound).toContain('403,418');
+        expect(insert!.bound).toContain('quota \\(soon\\)\\.');
+        expect(insert!.bound).toContain('quota (soon).');
+      });
+
+      it('a create with an invalid drop_codes answers 400 and writes no provider or rule', async () => {
+        const cookie = await adminCookie();
+        for (const drop_codes of ['abc', '200', '503-500']) {
+          const res = await adminJson(cookie, 'POST', '/providers', { name: `Bad ${drop_codes}`, base_url: 'https://bad.test', keys: [], drop_codes });
+          expect(res.status).toBe(400);
+        }
+        expect(providerInserts).toEqual([]);
+        expect(ruleWrites).toEqual([]);
+      });
+
+      it('a message with no codes answers 400 and writes nothing (DROP-06 empty)', async () => {
+        const cookie = await adminCookie();
+        const res = await adminJson(cookie, 'POST', '/providers', { name: 'Msg Only', base_url: 'https://msg.test', keys: [], drop_message: 'quota' });
+        expect(res.status).toBe(400);
+        expect(await res.json()).toMatchObject({ error: 'Add a status code to use this message.' });
+        expect(providerInserts).toEqual([]);
+        expect(ruleWrites).toEqual([]);
+      });
+
+      it('a create with neither drop field writes no error rule at all', async () => {
+        const cookie = await adminCookie();
+        const res = await adminJson(cookie, 'POST', '/providers', { name: 'Plain Relay', base_url: 'https://plain.test', keys: [] });
+        expect(res.status).toBe(201);
+        expect(ruleWrites).toEqual([]);
+      });
+
+      it('PUT with only the basic fields leaves the drop-list row alone (DROP-06)', async () => {
+        const cookie = await adminCookie();
+        const res = await adminJson(cookie, 'PUT', '/providers/1', { name: 'ProviderA', base_url: 'https://prov-a.test' });
+        expect(res.status).toBe(200);
+        expect(providerUpdates).toHaveLength(1);
+        expect(ruleWrites).toEqual([]);
+      });
+
+      it('PUT with blank drop fields deletes the drop-list row and inserts none (DROP-06 empty)', async () => {
+        const cookie = await adminCookie();
+        const res = await adminJson(cookie, 'PUT', '/providers/1', { drop_codes: '', drop_message: '' });
+        expect(res.status).toBe(200);
+        expect(ruleWrites).toHaveLength(1);
+        expect(ruleWrites[0].sql).toMatch(/^DELETE FROM error_rules WHERE provider_id = \? AND origin = 'drop_list'/);
+        expect(ruleWrites[0].sql).not.toMatch(/INSERT/);
+      });
+
+      it('PUT with codes writes the provider and upserts the rule in one batch (DROP-07)', async () => {
+        const cookie = await adminCookie();
+        const res = await adminJson(cookie, 'PUT', '/providers/1', { drop_codes: '403, 418', drop_message: '' });
+        expect(res.status).toBe(200);
+        expect(providerUpdates).toHaveLength(1);
+        expect(ruleWrites.map((w) => w.sql.split(' ')[0])).toEqual(['UPDATE', 'INSERT']);
+        expect(ruleWrites[0].bound).toContain('403,418');
+        expect(ruleWrites[1].bound).toContain('403,418');
+        expect(ruleWrites[1].sql).toContain('WHERE NOT EXISTS');
+        expect(batchSizes).toEqual([4]);
+      });
+
+      it('GET /providers shows the drop list on its provider and empty strings on a provider without one (DROP-06)', async () => {
+        mockRules.push({
+          id: 50,
+          provider_id: 1,
+          priority: -1,
+          status_codes: '403,418',
+          body_regex: 'quota',
+          action: 'INVALID_KEY',
+          cooldown_s: null,
+          note: 'quota',
+          enabled: 1,
+          origin: 'drop_list',
+        });
+        const cookie = await adminCookie();
+        const res = await worker.fetch(
+          new Request('https://gw.test/api/admin/providers', { method: 'GET', headers: { cookie } }),
+          env,
+          makeCtx().ctx,
+        );
+        const json = (await res.json()) as { providers: Array<{ id: number; drop_codes: string; drop_message: string }> };
+        expect(json.providers.find((p) => p.id === 1)).toMatchObject({ drop_codes: '403,418', drop_message: 'quota' });
+        expect(json.providers.find((p) => p.id === 2)).toMatchObject({ drop_codes: '', drop_message: '' });
+      });
+
+      it('PUT and DELETE on a drop-list rule answer 409 and write nothing (T-03-13)', async () => {
+        mockRules.push({
+          id: 50,
+          provider_id: 1,
+          priority: -1,
+          status_codes: '403,418',
+          body_regex: null,
+          action: 'INVALID_KEY',
+          cooldown_s: null,
+          note: null,
+          enabled: 1,
+          origin: 'drop_list',
+        });
+        const cookie = await adminCookie();
+        const put = await adminJson(cookie, 'PUT', '/rules/50', { action: 'INVALID_KEY', status_codes: '401', priority: 5 });
+        expect(put.status).toBe(409);
+        expect(await put.json()).toMatchObject({ error: "This rule comes from a provider's drop list. Edit it in the provider." });
+        const del = await adminJson(cookie, 'DELETE', '/rules/50', {});
+        expect(del.status).toBe(409);
+        expect(ruleWrites).toEqual([]);
+      });
+
+      it('a normal rule keeps the same behavior, with spaces typed between its codes stored as commas (DROP-06)', async () => {
+        const cookie = await adminCookie();
+        const res = await adminJson(cookie, 'PUT', '/rules/2', { action: 'EXHAUSTED', status_codes: '401 403', priority: 20 });
+        expect(res.status).toBe(200);
+        expect(ruleWrites).toHaveLength(1);
+        expect(ruleWrites[0].bound).toContain('401,403');
+      });
     });
   });
 });

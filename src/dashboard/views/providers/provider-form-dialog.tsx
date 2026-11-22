@@ -13,7 +13,9 @@ import { useUpdateProvider } from '@/hooks/use-provider-actions';
 import { api, type ProviderDTO } from '@/lib/api';
 import {
   ADVANCED_FIELDS,
+  DROP_FIELDS,
   buildProviderPayload,
+  dropSummary,
   emptyProviderForm,
   initialTestState,
   linesToMap,
@@ -27,6 +29,7 @@ import {
 } from '@/lib/provider-form';
 import { cn } from '@/lib/utils';
 import { AdvancedSection } from './advanced-section';
+import { DropKeysSection } from './drop-keys-section';
 
 interface CreateResponse {
   id: number;
@@ -41,6 +44,7 @@ interface ProviderFormDialogProps {
   /** Create starts from the defaults; edit starts from `provider` with every loaded value (PRV-03). */
   mode: 'create' | 'edit';
   provider?: ProviderDTO;
+  initialDropOpen?: boolean;
 }
 
 const NAME_ID = 'provider-name';
@@ -48,7 +52,7 @@ const URL_ID = 'provider-base-url';
 const KEYS_ID = 'provider-keys';
 
 // Top to bottom, as the fields appear: the first one with an error gets focus.
-const FOCUS_ORDER: readonly FormErrorKey[] = ['name', 'base_url', 'formats', 'timeout_ms', 'model_map', 'balance_divisor', 'recheck_hours', 'extra_headers'];
+const FOCUS_ORDER: readonly FormErrorKey[] = ['name', 'base_url', 'drop_codes', 'formats', 'timeout_ms', 'model_map', 'balance_divisor', 'recheck_hours', 'extra_headers'];
 const FIELD_ID: Partial<Record<FormErrorKey, string>> = { name: NAME_ID, base_url: URL_ID };
 
 function hostOf(rawUrl: string): string {
@@ -76,17 +80,18 @@ function createdToast(res: CreateResponse, addedToDefault: boolean): string {
 
 // The owner holds the form, the test state and the validation flags, so every value survives the
 // Dialog to Drawer swap at 768px (D-15): the children below are controlled and keep no state.
-export function ProviderFormDialog({ open, onOpenChange, mode, provider }: ProviderFormDialogProps) {
+export function ProviderFormDialog({ open, onOpenChange, mode, provider, initialDropOpen }: ProviderFormDialogProps) {
   const queryClient = useQueryClient();
   const editing = mode === 'edit' && provider !== undefined;
   // Initialised once: the page and the card mount this only while it is open, so each opening starts fresh.
   const [form, setForm] = useState<ProviderForm>(() => (editing ? providerToForm(provider) : emptyProviderForm()));
+  const [dropOpen, setDropOpen] = useState(initialDropOpen ?? false);
   // Advanced is collapsed on open in both modes (D-13); its fields stay mounted either way (D-15).
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
   const update = useUpdateProvider(provider?.id ?? 0);
   const [attempted, setAttempted] = useState(false);
-  const [touched, setTouched] = useState<{ name?: boolean; base_url?: boolean }>({});
+  const [touched, setTouched] = useState<Partial<Record<'name' | 'base_url' | 'drop_codes', boolean>>>({});
   const [testState, dispatchTest] = useReducer(testReducer, initialTestState);
 
   const set = <K extends keyof ProviderForm>(key: K, value: ProviderForm[K]) => setForm((f) => ({ ...f, [key]: value }));
@@ -98,6 +103,7 @@ export function ProviderFormDialog({ open, onOpenChange, mode, provider }: Provi
   const shown = {
     name: attempted || touched.name ? errors.name : undefined,
     base_url: attempted || touched.base_url ? errors.base_url : undefined,
+    drop_codes: attempted || touched.drop_codes ? errors.drop_codes : undefined,
   };
   // Advanced errors show after the first Save attempt and then follow the field live.
   const advancedErrors = attempted ? errors : {};
@@ -130,9 +136,9 @@ export function ProviderFormDialog({ open, onOpenChange, mode, provider }: Provi
     onSuccess: (res) => {
       toast.success(createdToast(res, form.add_to_default));
       if (form.add_to_default) void queryClient.invalidateQueries({ queryKey: ['routes'] });
+      void queryClient.invalidateQueries({ queryKey: ['rules'] });
       onOpenChange(false);
     },
-    // The Worker create is not atomic: a failure can leave the provider row behind, so always refetch.
     onSettled: () => queryClient.invalidateQueries({ queryKey: ['providers'] }),
   });
 
@@ -157,9 +163,8 @@ export function ProviderFormDialog({ open, onOpenChange, mode, provider }: Provi
     const firstBad = FOCUS_ORDER.find((k) => errors[k]);
     if (firstBad) {
       setAttempted(true);
-      // A closed Advanced is opened first, then the field gets focus on the next frame.
-      const advanced = ADVANCED_FIELDS.includes(firstBad);
-      if (advanced) setAdvancedOpen(true);
+      if (DROP_FIELDS.includes(firstBad)) setDropOpen(true);
+      if (ADVANCED_FIELDS.includes(firstBad)) setAdvancedOpen(true);
       requestAnimationFrame(() => {
         const el = document.getElementById(FIELD_ID[firstBad] ?? firstBad);
         if (el) el.focus();
@@ -285,6 +290,28 @@ export function ProviderFormDialog({ open, onOpenChange, mode, provider }: Provi
             ) : null}
           </div>
         </div>
+
+        <Collapsible open={dropOpen} onOpenChange={setDropOpen} className="flex flex-col gap-4">
+          <CollapsibleTrigger asChild>
+            <Button type="button" variant="outline" className="h-auto min-h-11 w-full justify-between py-2 text-left whitespace-normal" aria-expanded={dropOpen}>
+              <span className="flex min-w-0 flex-col items-start gap-1">
+                <span>Drop keys</span>
+                <span className="text-xs font-normal wrap-anywhere text-muted-foreground">
+                  {dropSummary(form) || 'Status codes that switch a key off until you re-enable it'}
+                </span>
+              </span>
+              <ChevronDown aria-hidden="true" className={cn('transition-transform', dropOpen && 'rotate-180')} />
+            </Button>
+          </CollapsibleTrigger>
+          <CollapsibleContent forceMount className={cn(!dropOpen && 'hidden')}>
+            <DropKeysSection
+              form={form}
+              onChange={patch}
+              errors={shown}
+              onCodesBlur={() => setTouched((t) => ({ ...t, drop_codes: true }))}
+            />
+          </CollapsibleContent>
+        </Collapsible>
 
         <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen} className="flex flex-col gap-4">
           <CollapsibleTrigger asChild>

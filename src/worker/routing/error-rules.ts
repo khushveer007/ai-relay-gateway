@@ -50,24 +50,22 @@ export function validateRegex(src: string): string | null {
   }
 }
 
-/** Pulls a short human-readable message out of an upstream error body. */
-export function extractReason(body: string): string {
+function readErrorText(body: string): { message: string; reason: string } {
   const trimmed = body.trim();
   // SSE: take the first data line
-  let candidate = trimmed;
-  const dataIdx = trimmed.indexOf('data:');
-  if (!trimmed.startsWith('{') && dataIdx >= 0) {
-    candidate = trimmed.slice(dataIdx + 5).split('\n')[0].trim();
-  }
+  const candidate = trimmed.startsWith('{') ? trimmed : /^data:(.*)$/m.exec(trimmed)?.[1] ?? trimmed;
   try {
     const j = JSON.parse(candidate) as Record<string, any>;
     const msg =
       j?.error?.message ?? j?.message ?? j?.error?.msg ?? j?.msg ?? (typeof j?.error === 'string' ? j.error : null) ?? j?.detail;
-    if (msg) return String(msg).slice(0, 300);
+    return {
+      message: typeof j === 'string' ? j : typeof msg === 'string' ? msg : '',
+      reason: typeof msg === 'string' && msg ? msg : trimmed,
+    };
   } catch {
     /* not JSON */
   }
-  return trimmed.slice(0, 300) || 'empty response body';
+  return { message: body, reason: trimmed };
 }
 
 export function parseRetryAfter(value: string | null | undefined, now = Date.now()): number | null {
@@ -90,10 +88,13 @@ export function classify(
   body: string,
   retryAfter?: string | null,
 ): Classification {
-  const reason = status === 0 ? body || 'network error' : extractReason(body);
-  if (status === 0) return { action: 'UPSTREAM_ERROR', ruleId: null, cooldownS: null, reason };
+  if (status === 0) return { action: 'UPSTREAM_ERROR', ruleId: null, cooldownS: null, reason: body || 'network error' };
 
-  const sample = body.length > 16384 ? body.slice(0, 16384) : body;
+  const error = readErrorText(body);
+  const reason = error.reason.slice(0, 300) || 'empty response body';
+  const maxMatchLength = 16384;
+  const sample = body.slice(0, maxMatchLength);
+  const messageSample = error.message.slice(0, maxMatchLength);
   const retry = parseRetryAfter(retryAfter);
 
   // `rules` are pre-sorted: provider-specific first, then global; each by priority.
@@ -104,7 +105,8 @@ export function classify(
     if (rule.status_codes.trim() !== '' && (status < 300 || !statusMatches(rule.status_codes, status))) continue;
     if (rule.body_regex) {
       const re = compile(rule.body_regex);
-      if (!re || !re.test(sample)) continue;
+      const matchText = rule.origin === 'drop_list' ? messageSample : sample;
+      if (!re || !re.test(matchText)) continue;
     }
     const cooldownS = rule.action === 'RATE_LIMITED' ? (retry ?? rule.cooldown_s ?? 60) : null;
     return { action: rule.action, ruleId: rule.id, cooldownS, reason };
