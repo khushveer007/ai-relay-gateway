@@ -6,6 +6,7 @@ import { getConfig, invalidateConfig } from '../src/worker/db/cache';
 import { keyStateStmt, parseKey, parseProvider, type KeyStatePatch } from '../src/worker/db/repo';
 import { ACTIVE_PATCH, applyKeyPatch, patchForAction } from '../src/worker/routing/key-state';
 import type { Env, Provider, ProviderKey } from '../src/worker/types';
+import worker from '../src/worker/index';
 
 type Row = Record<string, unknown>;
 type TestProxy = Awaited<ReturnType<typeof getPlatformProxy<Env>>>;
@@ -210,7 +211,7 @@ describe('DROP-01 request-path guard (real local D1)', () => {
       const { recheckKey } = await import('../src/worker/cron');
       const { loadConfig } = await import('../src/worker/db/repo');
       const balanceProvider = await seedBalanceProvider();
-      const id = await seedKeyFor(balanceProvider, { status: 'exhausted', balance: 0, balance_checked_at: T_FIRST, next_recheck_at: T_FIRST });
+      const id = await seedKeyFor(balanceProvider, { status: 'exhausted', balance: 0, balance_checked_at: T_FIRST, next_recheck_at: Date.now() + 6 * 3_600_000 });
 
       let releaseFetch!: () => void;
       const held = new Promise<void>((r) => (releaseFetch = r));
@@ -242,7 +243,7 @@ describe('DROP-01 request-path guard (real local D1)', () => {
       const { recheckKey } = await import('../src/worker/cron');
       const { loadConfig } = await import('../src/worker/db/repo');
       const balanceProvider = await seedBalanceProvider();
-      const id = await seedKeyFor(balanceProvider, { status: 'exhausted', balance: 0, balance_checked_at: T_FIRST, next_recheck_at: T_FIRST });
+      const id = await seedKeyFor(balanceProvider, { status: 'exhausted', balance: 0, balance_checked_at: T_FIRST, next_recheck_at: Date.now() + 6 * 3_600_000 });
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
         new Response(JSON.stringify({ data: { total_available: 2000000 } }), { status: 200, headers: { 'content-type': 'application/json' } }),
       );
@@ -330,6 +331,106 @@ describe('DROP-01 request-path guard (real local D1)', () => {
       );
       expect(reenable.status).toBe(200);
       expect((await rowOf(id)).status).toBe('active');
+    });
+    // runMaintenance selects an active key for a balance refresh. If that key drops while the balance request is
+    // in flight, the refresh must leave the whole row as the drop wrote it.
+    it('an in-flight maintenance balance refresh cannot change a key that dropped during the fetch', async () => {
+      const { runMaintenance } = await import('../src/worker/cron');
+      const balanceProvider = await seedBalanceProvider();
+      const id = await seedKeyFor(balanceProvider, { status: 'active', balance: 1, balance_checked_at: 0 });
+
+      let releaseFetch!: () => void;
+      const held = new Promise<void>((r) => (releaseFetch = r));
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+        await held;
+        return new Response(JSON.stringify({ data: { total_available: 3000000 } }), { status: 200, headers: { 'content-type': 'application/json' } });
+      });
+      try {
+        const maintenance = runMaintenance(env);
+        while (fetchSpy.mock.calls.length < 1) await new Promise((r) => setTimeout(r, 0));
+        await db
+          .prepare("UPDATE provider_keys SET status = 'invalid', status_reason = 'HTTP 401: bad key', status_changed_at = ? WHERE id = ?")
+          .bind(T_SECOND, id)
+          .run();
+        const afterDrop = await rowOf(id);
+
+        releaseFetch();
+        await maintenance;
+
+        expect(await rowOf(id)).toEqual(afterDrop);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    // Admin balance handlers: a dropped key is skipped before any request, and a drop during the fetch keeps its row.
+    describe('admin balance routes (authenticated, real D1)', () => {
+      const ctx = { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
+
+      async function adminCookieFor(adminEnv: Env): Promise<string> {
+        const login = await worker.fetch(
+          new Request('https://gw.test/api/admin/login', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ password: adminEnv.ADMIN_PASSWORD }),
+          }),
+          adminEnv,
+          ctx,
+        );
+        return login.headers.get('set-cookie')!.split(';')[0];
+      }
+
+      it('single-key check-balance on an invalid key skips the balance request and writes nothing', async () => {
+        const balanceProvider = await seedBalanceProvider();
+        const id = await seedKeyFor(balanceProvider, { status: 'invalid', status_reason: 'HTTP 401: bad key', status_changed_at: T_FIRST });
+        const before = await rowOf(id);
+        const adminEnv = { ...env, ADMIN_PASSWORD: 'pw-balance-skip', SESSION_SECRET: 'sess-balance-skip' };
+        const cookie = await adminCookieFor(adminEnv);
+        const fetchSpy = vi.spyOn(globalThis, 'fetch');
+        try {
+          const res = await worker.fetch(
+            new Request(`https://gw.test/api/admin/keys/${id}/check-balance`, { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: '{}' }),
+            adminEnv,
+            ctx,
+          );
+          expect(await res.json()).toEqual({ supported: false, balance: null, error: 'Key is dropped.' });
+          expect(fetchSpy).not.toHaveBeenCalled();
+          expect(await rowOf(id)).toEqual(before);
+        } finally {
+          fetchSpy.mockRestore();
+        }
+      });
+
+      it('provider check-balances skips a dropped key and refreshes an active one', async () => {
+        const balanceProvider = await seedBalanceProvider();
+        const droppedId = await seedKeyFor(balanceProvider, { status: 'invalid', status_reason: 'HTTP 401: bad key', status_changed_at: T_FIRST });
+        const activeId = await seedKeyFor(balanceProvider, { status: 'active' });
+        const droppedBefore = await rowOf(droppedId);
+        const adminEnv = { ...env, ADMIN_PASSWORD: 'pw-balance-list', SESSION_SECRET: 'sess-balance-list' };
+        const cookie = await adminCookieFor(adminEnv);
+        const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+          new Response(JSON.stringify({ data: { total_available: 4000000 } }), { status: 200, headers: { 'content-type': 'application/json' } }),
+        );
+        try {
+          const res = await worker.fetch(
+            new Request(`https://gw.test/api/admin/providers/${balanceProvider.id}/check-balances`, {
+              method: 'POST',
+              headers: { cookie, 'content-type': 'application/json' },
+              body: '{}',
+            }),
+            adminEnv,
+            ctx,
+          );
+          const json = (await res.json()) as { results: Array<{ key_id: number; error?: string }> };
+          expect(json.results.find((r) => r.key_id === droppedId)).toMatchObject({ error: 'Key is dropped.' });
+          // Only the active key reached the balance endpoint.
+          expect(fetchSpy).toHaveBeenCalledTimes(1);
+          expect(await rowOf(droppedId)).toEqual(droppedBefore);
+          expect((await rowOf(activeId)).balance).toBe(4);
+        } finally {
+          fetchSpy.mockRestore();
+        }
+      });
     });
   });
 });
