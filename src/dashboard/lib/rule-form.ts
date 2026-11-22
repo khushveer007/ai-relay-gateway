@@ -40,7 +40,7 @@ export interface RuleDtoLike {
 }
 
 export interface TesterForm {
-  /** '' is "Global rules only". */
+  /** '' is the all-provider scope. */
   provider_id: string;
   status: string;
   retry_after: string;
@@ -116,6 +116,18 @@ export function ruleSentence(
       : (rule.body_regex ? `Message matches: ${rule.body_regex}` : null),
     note: dropList ? null : rule.note,
   };
+}
+
+export function ruleMatchLabel(
+  ruleId: number | null,
+  rules: readonly Pick<RuleDtoLike, 'id' | 'origin' | 'provider_id'>[],
+  providers: readonly NamedProvider[],
+): string {
+  if (ruleId === null) return 'fallback rule';
+  const rule = rules.find((r) => r.id === ruleId);
+  return rule?.origin === 'drop_list'
+    ? `matched ${ruleScope(rule.provider_id, providers)}'s drop list`
+    : `matched rule #${ruleId}`;
 }
 
 export function emptyRuleForm(firstAction: string): RuleForm {

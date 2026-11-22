@@ -7,9 +7,10 @@ import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
 import { Field, fieldMessageId } from '@/components/field';
 import { ResponsiveDialog } from '@/components/responsive-dialog';
+import { RiskNote } from '@/components/risk-note';
 import { useSaveRule } from '@/hooks/use-rules';
 import type { Action, ErrorRuleDTO, ProviderDTO } from '@/lib/api';
-import { actionLabel } from '@/lib/format';
+import { actionConsequence, actionLabel, fmtCooldown } from '@/lib/format';
 import { buildRulePayload, emptyRuleForm, ruleToForm, validateRuleForm, type RuleForm } from '@/lib/rule-form';
 
 interface RuleDialogProps {
@@ -26,6 +27,7 @@ const ID = {
   scope: 'rule-scope',
   priority: 'rule-priority',
   status: 'rule-status',
+  risk: 'rule-status-risk',
   action: 'rule-action',
   cooldown: 'rule-cooldown',
   regex: 'rule-regex',
@@ -49,6 +51,10 @@ export function RuleDialog({ open, onOpenChange, mode, rule, providers, actions 
   const errors = validateRuleForm(form);
   const shown = attempted ? errors : {};
   const pending = save.isPending;
+  const dropsKey = form.action === 'INVALID_KEY';
+  const pausesKey = form.action === 'RATE_LIMITED';
+  const cooldownS = pausesKey && !errors.cooldown_s ? Number(form.cooldown_s) : null;
+  const selectedAction = actionLabel(form.action, { cooldownS });
   const set = (changes: Partial<RuleForm>) => setForm((f) => ({ ...f, ...changes }));
 
   const submit = () => {
@@ -92,10 +98,10 @@ export function RuleDialog({ open, onOpenChange, mode, rule, providers, actions 
         <div className="grid gap-4 md:grid-cols-2">
           <Field label="Scope" htmlFor={ID.scope}>
             <NativeSelect id={ID.scope} value={form.provider_id} onChange={(e) => set({ provider_id: e.target.value })}>
-              <NativeSelectOption value="">Global (all providers)</NativeSelectOption>
+              <NativeSelectOption value="">All providers</NativeSelectOption>
               {providers.map((p) => (
                 <NativeSelectOption key={p.id} value={String(p.id)}>
-                  Provider: {p.name}
+                  {p.name}
                 </NativeSelectOption>
               ))}
             </NativeSelect>
@@ -116,7 +122,7 @@ export function RuleDialog({ open, onOpenChange, mode, rule, providers, actions 
         <Field
           label="HTTP statuses"
           htmlFor={ID.status}
-          helper="Blank matches any status. Examples: 402, 401,403, 500-599"
+          helper="Blank matches any status. Separate with commas or spaces. Ranges like 500-503 work."
           error={shown.status_codes ?? shown.rule}
         >
           <Input
@@ -125,25 +131,45 @@ export function RuleDialog({ open, onOpenChange, mode, rule, providers, actions 
             placeholder="e.g. 402"
             value={form.status_codes}
             aria-invalid={shown.status_codes || shown.rule ? true : undefined}
-            aria-describedby={fieldMessageId(ID.status)}
+            aria-describedby={dropsKey ? `${fieldMessageId(ID.status)} ${ID.risk}` : fieldMessageId(ID.status)}
             onChange={(e) => set({ status_codes: e.target.value })}
           />
         </Field>
+        {dropsKey ? <RiskNote text={form.status_codes} id={ID.risk} /> : null}
 
         <div className="grid gap-4 md:grid-cols-2">
-          <Field label="Action" htmlFor={ID.action}>
-            <NativeSelect id={ID.action} value={form.action} onChange={(e) => set({ action: e.target.value })}>
+          <Field
+            label="Action"
+            htmlFor={ID.action}
+            helper={
+              <>
+                {form.action === 'EXHAUSTED' ? <span className="block md:hidden">{selectedAction}</span> : null}
+                {actionConsequence(form.action)}
+              </>
+            }
+          >
+            <NativeSelect id={ID.action} value={form.action} aria-describedby={fieldMessageId(ID.action)} onChange={(e) => set({ action: e.target.value })}>
               {actions.map((a) => (
                 <NativeSelectOption key={a} value={a}>
-                  {actionLabel(a)}
+                  {a === form.action ? selectedAction : actionLabel(a)}
                 </NativeSelectOption>
               ))}
               {/* A saved rule whose action the list no longer offers stays selectable instead of silently changing. */}
-              {actions.includes(form.action as Action) ? null : <NativeSelectOption value={form.action}>{actionLabel(form.action)}</NativeSelectOption>}
+              {actions.includes(form.action as Action) ? null : <NativeSelectOption value={form.action}>{selectedAction}</NativeSelectOption>}
             </NativeSelect>
           </Field>
-          {form.action === 'RATE_LIMITED' ? (
-            <Field label="Cooldown (seconds)" htmlFor={ID.cooldown} helper="How long the key rests after a rate limit." error={shown.cooldown_s}>
+          {pausesKey ? (
+            <Field
+              label="Pause length (seconds)"
+              htmlFor={ID.cooldown}
+              helper={
+                <>
+                  Key comes back by itself after this long, or after the time the provider asks for.
+                  {cooldownS !== null ? <span className="block">= {fmtCooldown(cooldownS)}</span> : null}
+                </>
+              }
+              error={shown.cooldown_s}
+            >
               <Input
                 id={ID.cooldown}
                 inputMode="numeric"

@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import * as ruleForm from '../src/dashboard/lib/rule-form';
 import {
   buildRulePayload,
   buildSettingsPayload,
   buildTesterPayload,
   emptyRuleForm,
+  ruleMatchLabel,
   ruleSentence,
   ruleToForm,
   settingsToForm,
@@ -203,10 +203,9 @@ describe('ruleSentence', () => {
 });
 
 it('attributes generated, ordinary, missing and fallback rule results', () => {
-  const { ruleMatchLabel } = ruleForm as { ruleMatchLabel?: (id: number | null, rules: RuleDtoLike[], providers: { id: number; name: string }[]) => string };
   const rules: RuleDtoLike[] = [{ ...savedRule, id: 7, provider_id: 4, origin: 'drop_list' }, savedRule];
-  const actual = [7, 3, 42, null].map((id) => ruleMatchLabel?.(id, rules, providers));
-  expect(j(actual)).toBe(j(["matched Relay's drop list", 'matched rule #3', 'matched rule #42', 'fallback rule']));
+  const actual = [7, 3, 42, null].map((id) => ruleMatchLabel(id, rules, providers));
+  expect(actual).toEqual(["matched Relay's drop list", 'matched rule #3', 'matched rule #42', 'fallback rule']);
 });
 
 describe('buildTesterPayload', () => {
