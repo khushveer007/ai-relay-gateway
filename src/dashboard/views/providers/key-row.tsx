@@ -12,8 +12,8 @@ import { ConfirmDialog } from '@/components/confirm-dialog';
 import { KeyStatusBadge } from '@/components/status-badge';
 import { useDeleteKey, useDisableKey, useEnableKey, useRecheckKey, useRenameKey, useTestKey } from '@/hooks/use-key-actions';
 import type { ProviderKeyDTO } from '@/lib/api';
-import { fmtAgo, fmtBalance } from '@/lib/format';
-import { keyReasonLine } from '@/lib/overview';
+import { enableLabel, fmtAgo, fmtBalance } from '@/lib/format';
+import { keyDropLines, keyReasonLine } from '@/lib/overview';
 import { RenameKeyDialog } from './rename-key-dialog';
 
 interface KeyRowProps {
@@ -40,8 +40,10 @@ export function KeyRow({ keyDto, index, count, reordering, onMove }: KeyRowProps
   // Both dialogs and the alias draft live here, as siblings of the menu, never inside its content (D-10, D-15).
   const [dialog, setDialog] = useState<'rename' | 'delete' | null>(null);
   const [aliasDraft, setAliasDraft] = useState('');
-  const reason = keyReasonLine(keyDto);
   const isActive = keyDto.status === 'active';
+  const isDropped = keyDto.status === 'invalid';
+  const dropLines = isDropped ? keyDropLines(keyDto) : null;
+  const reason = isDropped ? null : keyReasonLine(keyDto);
   const label = keyDto.alias || keyDto.key_hint;
   const mainPending = isActive ? test.isPending : enable.isPending;
   const statusPending = enable.isPending || disable.isPending;
@@ -62,6 +64,12 @@ export function KeyRow({ keyDto, index, count, reordering, onMove }: KeyRowProps
           ) : null}
         </div>
       </div>
+      {dropLines ? (
+        <div className="flex min-w-0 flex-col gap-0.5 md:col-span-2 md:row-start-2">
+          {dropLines.meta ? <p className="text-xs break-words text-muted-foreground">{dropLines.meta}</p> : null}
+          {dropLines.message ? <p className="text-xs break-words text-muted-foreground">{dropLines.message}</p> : null}
+        </div>
+      ) : null}
       {reason ? <p className="text-xs break-words text-muted-foreground md:col-span-2 md:row-start-2">{reason}</p> : null}
       <div className="flex items-center gap-2 md:col-start-2 md:row-start-1">
         <Button
@@ -71,7 +79,15 @@ export function KeyRow({ keyDto, index, count, reordering, onMove }: KeyRowProps
           disabled={mainPending}
           onClick={() => (isActive ? test.mutate(keyDto.id) : enable.mutate(keyDto.id))}
         >
-          {isActive ? (test.isPending ? 'Testing…' : 'Test') : enable.isPending ? 'Enabling…' : 'Enable'}
+          {isActive
+            ? test.isPending
+              ? 'Testing…'
+              : 'Test'
+            : enable.isPending
+              ? isDropped
+                ? 'Re-enabling…'
+                : 'Enabling…'
+              : enableLabel(keyDto.status)}
         </Button>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
@@ -94,7 +110,7 @@ export function KeyRow({ keyDto, index, count, reordering, onMove }: KeyRowProps
               </DropdownMenuItem>
             ) : (
               <DropdownMenuItem disabled={statusPending} onSelect={() => enable.mutate(keyDto.id)}>
-                Enable
+                {enableLabel(keyDto.status)}
               </DropdownMenuItem>
             )}
             <DropdownMenuItem disabled={reordering || index === 0} onSelect={() => onMove(keyDto.id, -1)}>

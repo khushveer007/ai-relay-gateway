@@ -1,5 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { actionLabel, fmtAgo, fmtBalance, fmtMs, fmtNum, fmtTime, fmtTokens, fmtTokensOrDash } from '../src/dashboard/lib/format';
+import {
+  actionConsequence,
+  actionLabel,
+  enableLabel,
+  fmtAgo,
+  fmtBalance,
+  fmtCooldown,
+  fmtDateTime,
+  fmtMs,
+  fmtNum,
+  fmtTime,
+  fmtTokens,
+  fmtTokensOrDash,
+  keyStatusLabel,
+  plainActionText,
+} from '../src/dashboard/lib/format';
 import { ALL_ACTIONS } from '../src/worker/types';
 import {
   DEFAULT_RANGE,
@@ -303,12 +318,110 @@ describe('routes', () => {
   });
 });
 
-describe('actionLabel', () => {
-  it('maps every action, and OK, to a non-empty string', () => {
-    for (const action of [...ALL_ACTIONS, 'OK']) expect(actionLabel(action).length).toBeGreaterThan(0);
+describe('actionLabel (DROP-08, D-11)', () => {
+  it('gives every action a non-empty plain name that differs from its code', () => {
+    for (const action of ALL_ACTIONS) {
+      const name = actionLabel(action);
+      expect(name.length).toBeGreaterThan(0);
+      expect(name).not.toBe(action);
+    }
   });
 
-  it('returns the current action name unchanged in this phase (D-28)', () => {
-    for (const action of [...ALL_ACTIONS, 'OK']) expect(actionLabel(action)).toBe(action);
+  it('names each of the five actions in plain words', () => {
+    expect(actionLabel('INVALID_KEY')).toBe('Drop key until I re-enable it');
+    expect(actionLabel('EXHAUSTED')).toBe('Mark out of balance (auto-recheck)');
+    expect(actionLabel('UPSTREAM_ERROR')).toBe('Try next provider');
+    expect(actionLabel('CLIENT_ERROR')).toBe('Return error to client');
+  });
+
+  it('shows RATE_LIMITED with its cooldown in minutes when one is valid', () => {
+    expect(actionLabel('RATE_LIMITED', { cooldownS: 600 })).toBe('Pause key for 10 min');
+  });
+
+  it('shows RATE_LIMITED as Pause key for N min when the cooldown is missing or bad', () => {
+    expect(actionLabel('RATE_LIMITED')).toBe('Pause key for N min');
+    expect(actionLabel('RATE_LIMITED', { cooldownS: null })).toBe('Pause key for N min');
+    expect(actionLabel('RATE_LIMITED', { cooldownS: 0 })).toBe('Pause key for N min');
+    expect(actionLabel('RATE_LIMITED', { cooldownS: Number.NaN })).toBe('Pause key for N min');
+  });
+
+  it('keeps OK as OK and returns an unknown value unchanged', () => {
+    expect(actionLabel('OK')).toBe('OK');
+    expect(actionLabel('SOMETHING_NEW')).toBe('SOMETHING_NEW');
+  });
+});
+
+describe('actionConsequence (DROP-08, D-11)', () => {
+  it('gives each of the five actions a caption', () => {
+    for (const action of ALL_ACTIONS) expect(actionConsequence(action).length).toBeGreaterThan(0);
+  });
+
+  it('returns an empty string for an unknown action', () => {
+    expect(actionConsequence('SOMETHING_NEW')).toBe('');
+  });
+});
+
+describe('keyStatusLabel and enableLabel (DROP-03, DROP-05)', () => {
+  it('maps each key status to its operator word', () => {
+    expect(keyStatusLabel('active')).toBe('Active');
+    expect(keyStatusLabel('rate_limited')).toBe('Paused');
+    expect(keyStatusLabel('exhausted')).toBe('Out of balance');
+    expect(keyStatusLabel('invalid')).toBe('Dropped');
+    expect(keyStatusLabel('disabled')).toBe('Disabled');
+  });
+
+  it('returns an unknown status unchanged', () => {
+    expect(keyStatusLabel('mystery')).toBe('mystery');
+  });
+
+  it('reads Re-enable for a dropped key and Enable for any other status', () => {
+    expect(enableLabel('invalid')).toBe('Re-enable');
+    expect(enableLabel('disabled')).toBe('Enable');
+    expect(enableLabel('exhausted')).toBe('Enable');
+    expect(enableLabel('active')).toBe('Enable');
+  });
+});
+
+describe('fmtCooldown (DROP-08 boundaries and precision)', () => {
+  it('switches from seconds to minutes at exactly 60 seconds', () => {
+    expect(fmtCooldown(59)).toBe('59 s');
+    expect(fmtCooldown(60)).toBe('1 min');
+    expect(fmtCooldown(61)).toBe('1 min');
+  });
+
+  it('rounds minutes to one decimal and drops a trailing .0', () => {
+    expect(fmtCooldown(90)).toBe('1.5 min');
+    expect(fmtCooldown(100)).toBe('1.7 min');
+    expect(fmtCooldown(150)).toBe('2.5 min');
+    expect(fmtCooldown(600)).toBe('10 min');
+    expect(fmtCooldown(3600)).toBe('60 min');
+  });
+
+  it('gives 0 s for zero and an empty string for a non-finite input, without throwing', () => {
+    expect(fmtCooldown(0)).toBe('0 s');
+    expect(fmtCooldown(Number.NaN)).toBe('');
+    expect(fmtCooldown(Number.POSITIVE_INFINITY)).toBe('');
+  });
+});
+
+describe('fmtDateTime', () => {
+  it('gives the day, short month and 24-hour time, without a year', () => {
+    expect(fmtDateTime(Date.UTC(2026, 10, 18, 14, 32))).toMatch(/^\d{1,2} [A-Z][a-z]{2}, \d{2}:\d{2}$/);
+  });
+});
+
+describe('plainActionText (D-13)', () => {
+  it('replaces a whole-word raw action code with its plain name', () => {
+    const out = plainActionText('All failed (A/k: INVALID_KEY)');
+    expect(out).toContain('Drop key until I re-enable it');
+    expect(out).not.toMatch(/INVALID_KEY/);
+  });
+
+  it('leaves text without a raw code alone', () => {
+    expect(plainActionText('HTTP 403: forbidden')).toBe('HTTP 403: forbidden');
+  });
+
+  it('does not touch a code that is only part of a longer word', () => {
+    expect(plainActionText('NOT_INVALID_KEY_X')).toBe('NOT_INVALID_KEY_X');
   });
 });

@@ -1,6 +1,6 @@
 // Pure Overview helpers. DOM-free; relative imports only (Vitest has no alias, and the Worker
 // tsconfig that type-checks test/ has no DOM lib).
-import { fmtAgo } from './format';
+import { fmtAgo, fmtDateTime } from './format';
 
 export const RANGES = ['1h', '24h', '7d'] as const;
 export type Range = (typeof RANGES)[number];
@@ -97,6 +97,10 @@ export interface KeyTextInput {
   status_reason: string | null;
   cooldown_until: number | null;
   next_recheck_at: number | null;
+  /** The relay HTTP status stored with a drop (DROP-04). Optional so fixtures from before this phase compile. */
+  status_code?: number | null;
+  /** When the key was dropped, in ms (the first drop's time, DROP-04). */
+  status_changed_at?: number | null;
 }
 
 export function keyLabel(key: Pick<KeyTextInput, 'alias' | 'key_hint'>): string {
@@ -104,7 +108,38 @@ export function keyLabel(key: Pick<KeyTextInput, 'alias' | 'key_hint'>): string 
   return key.key_hint || '—';
 }
 
+/** The HTTP code of a drop, or null when the key has none stored (a status of 0 is never stored). */
+function dropCode(key: KeyTextInput): number | null {
+  return key.status_code != null && key.status_code > 0 ? key.status_code : null;
+}
+
+/**
+ * The two stacked lines under a dropped key's badge (DROP-05, UI-SPEC). The meta line reads
+ * "HTTP 403 · dropped 3h ago (18 Nov, 14:32)" and drops whichever part is missing. The absolute time
+ * always sits beside the relative time, because a phone cannot hover. The message line is the stored
+ * reason, with any raw action code shown as its plain name.
+ */
+export function keyDropLines(key: KeyTextInput): { meta: string | null; message: string | null } {
+  const code = dropCode(key);
+  const ts = key.status_changed_at;
+  const when = ts ? `${code ? 'dropped' : 'Dropped'} ${fmtAgo(ts)} (${fmtDateTime(ts)})` : null;
+  const parts = [code ? `HTTP ${code}` : null, when].filter((p): p is string => p !== null);
+  return {
+    meta: parts.length > 0 ? parts.join(' · ') : null,
+    message: key.status_reason ? key.status_reason : null,
+  };
+}
+
 export function keyDetailText(key: KeyTextInput): string {
+  if (key.status === 'invalid') {
+    const code = dropCode(key);
+    const parts = [
+      code ? `HTTP ${code}` : null,
+      key.status_reason ? key.status_reason : null,
+      key.status_changed_at ? `dropped ${fmtAgo(key.status_changed_at)}` : null,
+    ].filter((p): p is string => p !== null);
+    return parts.length > 0 ? parts.join(' · ') : 'Dropped';
+  }
   let detail = key.status_reason ? key.status_reason : 'Healthy';
   if (key.status === 'rate_limited' && key.cooldown_until) {
     detail += ` · cools down ${fmtAgo(key.cooldown_until)}`;

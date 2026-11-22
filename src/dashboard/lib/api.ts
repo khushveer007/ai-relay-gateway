@@ -10,6 +10,7 @@ export interface ProviderKeyDTO {
   priority: number;
   status: KeyStatus;
   status_reason: string | null;
+  status_code: number | null;
   status_changed_at: number | null;
   cooldown_until: number | null;
   next_recheck_at: number | null;
