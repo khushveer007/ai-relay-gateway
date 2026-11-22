@@ -4,9 +4,10 @@ import migration from '../migrations/0001_init.sql?raw';
 import dropMigration from '../migrations/0002_key_drop.sql?raw';
 import { encrypt } from '../src/worker/db/crypto';
 import { getConfig, invalidateConfig } from '../src/worker/db/cache';
-import { keyStateStmt, parseKey, parseProvider, parseRule, type KeyStatePatch } from '../src/worker/db/repo';
+import { keyStateStmt, loadConfig, parseKey, parseProvider, parseRule, type KeyStatePatch } from '../src/worker/db/repo';
 import { classify } from '../src/worker/routing/error-rules';
 import { ACTIVE_PATCH, applyKeyPatch, patchForAction } from '../src/worker/routing/key-state';
+import { dropListStmts, parseDropList } from '../src/worker/routing/drop-list';
 import type { Env, ErrorRule, Provider, ProviderKey } from '../src/worker/types';
 import worker from '../src/worker/index';
 
@@ -691,3 +692,125 @@ describe('DROP-01 request-path guard (real local D1)', () => {
     });
   });
 });
+
+// DROP-06 and DROP-07 (plan 03-03 Task 1): a saved drop list is the first rule for its provider, through real D1.
+describe('drop list classification (real local D1)', () => {
+  let proxy: TestProxy;
+  let db: D1Database;
+  let dropProvider: Provider;
+  let plainProvider: Provider;
+
+  beforeAll(async () => {
+    proxy = await getPlatformProxy<Env>({ persist: false });
+    db = proxy.env.DB;
+    const ddls = migration.match(/CREATE TABLE [\s\S]*?\n\);/g) ?? [];
+    for (const ddl of ddls) await db.prepare(ddl.replace(/--.*$/gm, '')).run();
+    const statements = dropMigration
+      .replace(/--.*$/gm, '')
+      .split(';')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    for (const stmt of statements) await db.prepare(stmt).run();
+    await db.prepare("INSERT INTO settings (key, value) VALUES ('config_version', '1')").run();
+    await db
+      .prepare("INSERT INTO providers (id, name, base_url, balance_mode, recheck_mode) VALUES (1, 'drop-list-provider', 'https://drop.example', 'none', 'manual')")
+      .run();
+    await db
+      .prepare("INSERT INTO providers (id, name, base_url, balance_mode, recheck_mode) VALUES (2, 'plain-provider', 'https://plain.example', 'none', 'manual')")
+      .run();
+    dropProvider = parseProvider((await db.prepare('SELECT * FROM providers WHERE id = 1').first<Row>())!);
+    plainProvider = parseProvider((await db.prepare('SELECT * FROM providers WHERE id = 2').first<Row>())!);
+
+    // Operator rule for the drop-list provider at priority 0 on 403, written before the drop list. Its id is lower than
+    // the drop-list row, and the drop list must still win (D-06).
+    await db
+      .prepare(
+        "INSERT INTO error_rules (id, provider_id, priority, status_codes, body_regex, action, cooldown_s, note, enabled) VALUES (910, 1, 0, '403', NULL, 'RATE_LIMITED', 120, 'operator 403', 1)",
+      )
+      .run();
+    // Global rules: 401 drops the key and 403 pauses it (the 0001 defaults, copied here because this harness inserts none).
+    await db
+      .prepare(
+        "INSERT INTO error_rules (id, provider_id, priority, status_codes, body_regex, action, cooldown_s, note, enabled) VALUES (911, NULL, 40, '401', NULL, 'INVALID_KEY', NULL, '401', 1)",
+      )
+      .run();
+    await db
+      .prepare(
+        "INSERT INTO error_rules (id, provider_id, priority, status_codes, body_regex, action, cooldown_s, note, enabled) VALUES (912, NULL, 50, '403', NULL, 'RATE_LIMITED', 600, '403', 1)",
+      )
+      .run();
+  }, 60_000);
+
+  afterAll(async () => {
+    invalidateConfig();
+    await proxy?.dispose();
+  });
+
+  async function seedKeyFor(p: Provider): Promise<number> {
+    const enc_ = await encrypt('sk-drop-list-key', proxy.env.ENCRYPTION_KEY);
+    const res = await db
+      .prepare("INSERT INTO provider_keys (provider_id, alias, key_enc, key_hint, status) VALUES (?, ?, ?, 'sk-dro...0000', 'active')")
+      .bind(p.id, `dl-${Math.random().toString(36).slice(2)}`, enc_)
+      .run();
+    return Number(res.meta.last_row_id);
+  }
+
+  async function keyRow(id: number): Promise<Row> {
+    return (await db.prepare('SELECT * FROM provider_keys WHERE id = ?').bind(id).first<Row>())!;
+  }
+
+  async function keyOf(id: number): Promise<ProviderKey> {
+    return parseKey(await keyRow(id));
+  }
+
+  it('a provider drop list drops a key before the operator rules and the global rules (DROP-07, D-06)', async () => {
+    // Save the drop list through the Worker's own statements, in one batch, the way POST /providers does.
+    await db.batch(dropListStmts(db, dropProvider.id, parseDropList('403,418', undefined)));
+
+    const cfg = await loadConfig(db);
+    const dropRow = cfg.rules.find((r) => r.origin === 'drop_list');
+    expect(dropRow).toBeDefined();
+    expect(cfg.rules.filter((r) => r.provider_id === dropProvider.id)[0]).toMatchObject({ origin: 'drop_list', priority: -1 });
+
+    // 403 and 418 both drop with the drop-list rule's id, ahead of the operator rule on 403.
+    expect(classify(cfg.rules, dropProvider.id, 403, 'forbidden', null)).toMatchObject({ action: 'INVALID_KEY', ruleId: dropRow!.id });
+    expect(classify(cfg.rules, dropProvider.id, 418, 'teapot', null)).toMatchObject({ action: 'INVALID_KEY', ruleId: dropRow!.id });
+    // 401 is not in the list, so it falls through to the global 401 rule.
+    expect(classify(cfg.rules, dropProvider.id, 401, 'nope', null)).toMatchObject({ action: 'INVALID_KEY', ruleId: 911 });
+
+    // Drop a key on 418 through the guarded UPDATE and read the code back from D1.
+    const id = await seedKeyFor(dropProvider);
+    const cls = classify(cfg.rules, dropProvider.id, 418, 'teapot', null);
+    const patch = patchForAction(dropProvider, cls.action, cls.reason, cls.cooldownS, 418, NOW)!;
+    await applyKeyPatch(proxy.env, await keyOf(id), patch, NOW);
+    expect(parseKey(await keyRow(id))).toMatchObject({ status: 'invalid', status_code: 418 });
+  });
+
+  it('a provider without a drop list classifies as before (DROP-07)', async () => {
+    const cfg = await loadConfig(db);
+    // The plain provider has no drop-list row, so 403 is the global RATE_LIMITED rule and 401 the global INVALID_KEY rule.
+    expect(classify(cfg.rules, plainProvider.id, 403, 'forbidden', null)).toMatchObject({ action: 'RATE_LIMITED', ruleId: 912 });
+    expect(classify(cfg.rules, plainProvider.id, 401, 'nope', null)).toMatchObject({ action: 'INVALID_KEY', ruleId: 911 });
+  });
+
+  it('DROP-06 empty: a blank code list deletes the drop-list row and inserts none', async () => {
+    await db.batch(dropListStmts(db, dropProvider.id, parseDropList('403,418', undefined)));
+    expect((await loadConfig(db)).rules.some((r) => r.origin === 'drop_list' && r.provider_id === dropProvider.id)).toBe(true);
+    await db.batch(dropListStmts(db, dropProvider.id, parseDropList('', undefined)));
+    expect((await loadConfig(db)).rules.some((r) => r.origin === 'drop_list' && r.provider_id === dropProvider.id)).toBe(false);
+  });
+
+  it('DROP-06 encoding: a message with metacharacters matches itself literally, case-insensitively, and not looser text', async () => {
+    await db.batch(dropListStmts(db, dropProvider.id, parseDropList('429', 'quota (soon).')));
+    const cfg = await loadConfig(db);
+    expect(classify(cfg.rules, dropProvider.id, 429, 'QUOTA (SOON).', null)).toMatchObject({ action: 'INVALID_KEY' });
+    expect(classify(cfg.rules, dropProvider.id, 429, 'quota xsoonx', null).action).not.toBe('INVALID_KEY');
+  });
+
+  it('DROP-06 encoding: a CJK message matches literally on its code', async () => {
+    await db.batch(dropListStmts(db, dropProvider.id, parseDropList('400', '余额不足')));
+    const cfg = await loadConfig(db);
+    expect(classify(cfg.rules, dropProvider.id, 400, '{"error":"余额不足，请充值"}', null)).toMatchObject({ action: 'INVALID_KEY' });
+  });
+});
+
