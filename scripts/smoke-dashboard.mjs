@@ -13,8 +13,11 @@
 //      SMOKE_ALLOW_REUSE=1 lets the script use a Worker that is already running on the port. Without it the
 //      script refuses, because it creates and deletes data and that Worker may not be a disposable local one.
 // The script only ever talks to 127.0.0.1:8787 and never deploys anything.
+import { ok } from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
+import { once } from 'node:events';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -28,6 +31,7 @@ const SKIP_RENDER = process.argv.includes('--skip-render');
 let failures = 0;
 let passes = 0;
 let child = null;
+let persistence = null;
 
 function report(ok, label, detail = '') {
   if (ok) passes += 1;
@@ -39,25 +43,35 @@ function info(label, detail = '') {
   console.log(`INFO ${label}${detail ? ` - ${detail}` : ''}`);
 }
 
-function stopChild() {
-  if (!child || child.killed) return;
+function signalChild(proc, signal) {
   try {
-    // The child leads its own process group so workerd dies with `npx wrangler`.
-    process.kill(-child.pid, 'SIGTERM');
+    process.kill(-proc.pid, signal);
   } catch {
+    proc.kill(signal);
+  }
+}
+
+async function stopServer() {
+  if (child?.pid && child.exitCode === null && child.signalCode === null) {
+    const exited = once(child, 'exit');
+    signalChild(child, 'SIGTERM');
+    const timeout = setTimeout(() => signalChild(child, 'SIGKILL'), 5000);
     try {
-      child.kill('SIGTERM');
-    } catch {
-      /* already gone */
+      await exited;
+    } finally {
+      clearTimeout(timeout);
     }
   }
   child = null;
+  if (persistence) {
+    rmSync(persistence, { recursive: true, force: true });
+    persistence = null;
+  }
 }
 
-process.on('exit', stopChild);
 for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
-  process.on(sig, () => {
-    stopChild();
+  process.once(sig, async () => {
+    await stopServer();
     process.exit(130);
   });
 }
@@ -103,38 +117,33 @@ async function healthy() {
 
 async function ensureServer() {
   if (await healthy()) {
-    // The provider round trip always creates and deletes rows, and --check-mobile seeds and sweeps `audit-*`
-    // ones. A Worker this script did not start could be `wrangler dev --remote` on the production D1 (T-02-31),
-    // so reusing one needs an explicit opt-in.
+    if (CHECK_MOBILE) throw new Error('The mobile audit requires a Worker started by this script. Stop the Worker on port 8787 and retry.');
     if (process.env.SMOKE_ALLOW_REUSE !== '1') {
-      console.error(`FAIL a Worker is already answering at ${BASE}. This script creates and deletes data through its admin API.`);
-      console.error('     Stop it so the script starts a local one, or set SMOKE_ALLOW_REUSE=1 if it is a local, disposable Worker.');
-      process.exit(1);
+      throw new Error('A Worker is already answering on port 8787. Stop it or set SMOKE_ALLOW_REUSE=1 for a disposable local Worker.');
     }
     console.log(`Using the Worker already running at ${BASE} (SMOKE_ALLOW_REUSE=1)`);
     return;
   }
   console.log('No Worker on 127.0.0.1:8787, applying local migrations and starting wrangler dev...');
-  const mig = spawnSync('npm', ['run', 'db:migrate:local'], { stdio: 'ignore', timeout: 120_000 });
-  if (mig.status !== 0) {
-    console.error('FAIL npm run db:migrate:local did not succeed.');
-    process.exit(1);
-  }
-  child = spawn('npx', ['wrangler', 'dev', '--port', '8787'], { stdio: 'ignore', detached: true });
-  child.on('exit', (code) => {
-    if (child) {
-      console.error(`FAIL wrangler dev exited early (code ${code}).`);
-      child = null;
-      process.exit(1);
-    }
+  persistence = mkdtempSync(join(tmpdir(), 'gw-smoke-d1-'));
+  const persistArgs = ['--persist-to', persistence];
+  const mig = spawnSync('npm', ['run', 'db:migrate:local', '--', ...persistArgs], { stdio: 'ignore', timeout: 120_000 });
+  if (mig.status !== 0) throw new Error('Local D1 migrations did not succeed.');
+
+  child = spawn('npx', ['--no-install', 'wrangler', 'dev', '--local', '--ip', '127.0.0.1', '--port', '8787', ...persistArgs], {
+    stdio: 'ignore',
+    detached: true,
   });
+  let startError = null;
+  child.once('error', (error) => { startError = error; });
   const deadline = Date.now() + 90_000;
   while (Date.now() < deadline) {
+    if (startError) throw startError;
+    if (child.exitCode !== null || child.signalCode !== null) throw new Error('wrangler dev exited before answering /api/health.');
     if (await healthy()) return;
     await sleep(500);
   }
-  console.error('FAIL wrangler dev did not answer /api/health within 90 s.');
-  process.exit(1);
+  throw new Error('wrangler dev did not answer /api/health within 90 s.');
 }
 
 function jsonType(res) {
@@ -198,13 +207,166 @@ async function providerRoundTrip(cookie) {
   const name = `smoke-provider-${Date.now()}`;
   let id = null;
   try {
-    const created = await adminCall(cookie, 'POST', '/providers', { name, base_url: 'http://127.0.0.1:9', keys: KEY_TEXT });
+    const created = await adminCall(cookie, 'POST', '/providers', {
+      name, base_url: 'http://127.0.0.1:9', keys: KEY_TEXT, add_to_default: false,
+      ...(persistence ? { drop_codes: '418' } : {}),
+    });
     id = created.data?.id ?? null;
     const list = await adminCall(cookie, 'GET', '/providers');
-    const listed = (list.data?.providers ?? []).some((p) => p.id === id && p.name === name);
-    report(created.status === 201 && id !== null && listed, 'check 18: POST /providers with name, URL and keys answers 201 and the provider is listed', `create ${created.status}, listed ${listed}`);
+    const listed = list.data?.providers?.find((p) => p.id === id && p.name === name);
+    report(created.status === 201 && Boolean(listed) && (!persistence || listed.drop_codes === '418'),
+      'check 18: provider round trip saves and lists the provider', `create ${created.status}, listed ${Boolean(listed)}`);
   } finally {
     if (id !== null) await adminCall(cookie, 'DELETE', `/providers/${id}`);
+  }
+}
+
+async function until(find, description) {
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline) {
+    const found = await find();
+    if (found) return found;
+    await sleep(150);
+  }
+  throw new Error(description);
+}
+
+async function keyDropLifecycle(cookie, audit) {
+  ok(persistence, 'key-drop lifecycle requires disposable local D1');
+  const tag = `audit-${crypto.randomUUID().slice(0, 12)}`;
+  const model = `${tag}-model`;
+  const testModel = `${tag}-test`;
+  const keys = [`sk-${tag}-first`, `sk-${tag}-second`];
+  const dropCodes = '403,418';
+  const dropMessage = 'Account blocked (smoke).';
+  const suffix = 'End of smoke drop reason.';
+  const pad = 'This key was rejected by the local fixture. ';
+  const longReason = `${dropMessage} ${pad.repeat(7).slice(0, 298 - dropMessage.length - suffix.length)} ${suffix}`;
+  let rejection = dropMessage;
+  const calls = [];
+  const mock = createServer((req, res) => {
+    const path = req.url.split('?')[0];
+    res.setHeader('content-type', 'application/json');
+    if (req.method === 'GET' && path === '/v1/models') {
+      res.end(JSON.stringify({ data: [{ id: testModel }] }));
+      return;
+    }
+    const key = keys.indexOf(req.headers['x-api-key']);
+    if (req.method !== 'POST' || path !== '/v1/messages' || key === -1) {
+      res.writeHead(404).end('{}');
+      return;
+    }
+    calls.push(key + 1);
+    req.resume();
+    if (key === 0 && rejection) {
+      res.writeHead(403).end(JSON.stringify({ error: { message: rejection } }));
+      return;
+    }
+    res.end(JSON.stringify({ id: `smoke-key-${key + 1}`, type: 'message', content: [], usage: { input_tokens: 1, output_tokens: 1 } }));
+  });
+
+  const api = async (method, path, body, expected = 200) => {
+    const response = await adminCall(cookie, method, path, body);
+    ok(response.status === expected, `key-drop lifecycle: ${method} ${path} returned HTTP ${response.status}`);
+    return response.data;
+  };
+  const ruleTest = (body) => api('POST', '/rules/test', body);
+  let providerId;
+  let routeId;
+  let gatewayKey;
+  const readProvider = async () => (await api('GET', '/providers')).providers.find((provider) => provider.id === providerId);
+
+  try {
+    await once(mock.listen(0, '127.0.0.1'), 'listening');
+    ({ id: providerId } = await api('POST', '/providers', {
+      name: tag, base_url: `http://127.0.0.1:${mock.address().port}`, keys: keys.join('\n'),
+      formats: ['anthropic'], key_strategy: 'sequential', test_model: testModel, add_to_default: false,
+      drop_codes: dropCodes, drop_message: dropMessage,
+    }, 201));
+    const provider = await readProvider();
+    ok(provider?.drop_codes === dropCodes && provider.drop_message === dropMessage && provider.models.includes(testModel),
+      'key-drop lifecycle: provider saved its drop list and loaded models');
+    const [first, second] = provider.keys;
+    ok(first?.id && second?.id && first.priority < second.priority, 'key-drop lifecycle: two ordered provider keys');
+    ({ id: routeId } = await api('POST', '/routes', {
+      name: tag, model_patterns: [`${tag}-*`], provider_ids: [providerId],
+    }, 201));
+    ({ key: gatewayKey } = await api('POST', '/gateway-keys', { name: tag, route_id: routeId }, 201));
+    ok(gatewayKey, 'key-drop lifecycle: gateway key created');
+    await api('POST', '/rules', { provider_id: providerId, priority: 0, status_codes: '403', action: 'RATE_LIMITED', note: tag }, 201);
+    const { rules } = await api('GET', '/rules');
+    const dropRule = rules.find((rule) => rule.provider_id === providerId && rule.origin === 'drop_list');
+    const manualRule = rules.find((rule) => rule.provider_id === providerId && rule.note === tag);
+    ok(dropRule?.status_codes === dropCodes && dropRule.note === dropMessage && dropRule.priority === -1 && manualRule?.id,
+      'key-drop lifecycle: Rules mirrors the provider drop list');
+    await api('DELETE', `/rules/${dropRule.id}`, {}, 409);
+    const matched = await ruleTest({ provider_id: providerId, status: 403, body: dropMessage });
+    const unmatched = await ruleTest({ provider_id: providerId, status: 403, body: 'Account blocked smoke!' });
+    ok(matched.ruleId === dropRule.id && matched.action === 'INVALID_KEY' && unmatched.ruleId === manualRule.id && unmatched.action === 'RATE_LIMITED',
+      'key-drop lifecycle: matching text drops the key before the manual rule, altered text matches the manual rule');
+
+    const proxy = async (expectedKeys, requestModel = model) => {
+      calls.length = 0;
+      const response = await fetch(`${BASE}/v1/messages`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': gatewayKey, 'anthropic-version': '2023-06-01' },
+        body: JSON.stringify({ model: requestModel, max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      const payload = await response.json().catch(() => null);
+      ok(response.status === 200 && payload?.id === `smoke-key-${expectedKeys.at(-1)}` && calls.join() === expectedKeys.join(),
+        `key-drop lifecycle: proxy expected keys ${expectedKeys.join(', ')}, got ${calls.join(', ') || 'none'} (HTTP ${response.status})`);
+    };
+    const firstKey = async () => (await readProvider()).keys.find((key) => key.id === first.id);
+    const droppedKey = () => until(async () => {
+      const key = await firstKey();
+      return key?.status === 'invalid' && key;
+    }, 'key-drop lifecycle: first key did not become dropped');
+
+    const beforeDrop = Date.now();
+    await proxy([1, 2]);
+    const drop = await droppedKey();
+    ok(drop.status_code === 403 && drop.status_reason === rejection && drop.status_changed_at >= beforeDrop && drop.status_changed_at <= Date.now(),
+      'key-drop lifecycle: first drop stores HTTP 403, reason and timestamp');
+    rejection = null;
+    calls.length = 0;
+    const diagnostic = await api('POST', `/keys/${first.id}/test`);
+    ok(diagnostic.ok && diagnostic.status === 200 && diagnostic.key_status === 'invalid' && calls.join() === '1',
+      'key-drop lifecycle: diagnostic succeeded on the dropped key');
+    const afterTest = await firstKey();
+    ok(['status', 'status_code', 'status_reason', 'status_changed_at'].every((field) => afterTest[field] === drop[field]),
+      'key-drop lifecycle: diagnostic left the drop record intact');
+    await proxy([2]);
+    await api('PUT', `/keys/${first.id}`, { status: 'active' });
+    const enabled = await firstKey();
+    ok(enabled.status === 'active' && enabled.status_code === null && enabled.status_reason === null,
+      'key-drop lifecycle: explicit Re-enable cleared the drop record');
+    await proxy([1]);
+    report(true, 'key-drop lifecycle', 'drop, rotation, report-only Test, and explicit Re-enable passed on local D1');
+
+    if (audit) {
+      rejection = longReason;
+      const auditModel = `${tag}-mobile`;
+      await proxy([1, 2], auditModel);
+      const dropped = await droppedKey();
+      ok(dropped.status_reason === longReason, 'key-drop lifecycle: browser fixture stored the full reason');
+      const log = await until(async () => (await api('GET', `/logs?model=${auditModel}`)).logs
+        .find((item) => item.model === auditModel && item.route_id === routeId && item.attempts[0]?.key_id === first.id && item.attempts[1]?.key_id === second.id),
+      'key-drop lifecycle: browser fixture request log did not commit');
+      await audit({ tag, providerId, dropCodes, dropMessage, suffix, longReason, auditModel, log });
+    }
+  } finally {
+    try {
+      if (routeId !== undefined) {
+        const { keys } = await api('GET', '/gateway-keys');
+        for (const key of keys) {
+          if (key.name === tag && key.route_id === routeId) await api('DELETE', `/gateway-keys/${key.id}`);
+        }
+        await api('DELETE', `/routes/${routeId}`);
+      }
+      if (providerId !== undefined) await api('DELETE', `/providers/${providerId}`);
+    } finally {
+      if (mock.listening) await new Promise((resolve) => mock.close(resolve));
+    }
   }
 }
 
@@ -738,17 +900,15 @@ async function main() {
     info('stale chunk /assets/does-not-exist-0000.js', `status ${missing.status}, content-type "${missing.headers.get('content-type') || ''}"`);
   }
 
-  // 17-18 always run; --check-mobile adds the 360px audit.
   await providerRoundTrip(cookie);
+  if (persistence) await keyDropLifecycle(cookie);
   if (CHECK_MOBILE) await checkMobile(cookie);
 
   console.log(`\n${passes} passed, ${failures} failed`);
-  stopChild();
-  process.exit(failures > 0 ? 1 : 0);
+  process.exitCode = failures > 0 ? 1 : 0;
 }
 
-main().catch((err) => {
+main().finally(stopServer).catch((err) => {
   console.error('FAIL smoke script crashed:', err?.message ?? err);
-  stopChild();
-  process.exit(1);
+  process.exitCode = 1;
 });
