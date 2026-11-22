@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { keyDetailText, keyDropLines, keyReasonLine, type KeyTextInput } from '../src/dashboard/lib/overview';
+import { keyDetailText, keyDropLines, keyReasonLine, keyTestToast, type KeyTextInput } from '../src/dashboard/lib/overview';
 
 const NOW = Date.UTC(2026, 10, 14, 12, 0, 0);
 const MIN = 60_000;
@@ -103,5 +103,94 @@ describe('keyReasonLine (research correction C3)', () => {
   it('returns the bare reason for an active key and for a status with no schedule', () => {
     expect(keyReasonLine(key({ status: 'active', status_reason: 'recovered' }))).toBe('recovered');
     expect(keyReasonLine(key({ status: 'invalid', status_reason: 'HTTP 401' }))).toBe('HTTP 401');
+  });
+});
+
+describe('keyTestToast (DROP-10, E8)', () => {
+  const ok = (key_status: string) => ({ ok: true, message: 'Key works', ms: 412, status: 200, key_status });
+  const fail = (key_status: string, status: number, reason: string | undefined, message = 'boom') => ({
+    ok: false,
+    message,
+    ms: 412,
+    status,
+    key_status,
+    cls: reason === undefined ? undefined : { reason },
+  });
+
+  it('says a dropped key that works is still dropped and points at Re-enable', () => {
+    expect(keyTestToast(ok('invalid'))).toEqual({
+      kind: 'success',
+      text: 'Key works. Still dropped. Press Re-enable to use it. (412 ms)',
+    });
+  });
+
+  it('says a dropped key that fails is still dropped, with its HTTP status and reason', () => {
+    expect(keyTestToast(fail('invalid', 403, 'blocked'))).toEqual({
+      kind: 'error',
+      text: 'Still failing: HTTP 403 blocked. Still dropped.',
+    });
+  });
+
+  it('keeps Still dropped as the last words of a long reason', () => {
+    const long = 'x'.repeat(400);
+    const { text } = keyTestToast(fail('invalid', 403, long));
+    expect(text.endsWith('Still dropped.')).toBe(true);
+    expect(text.startsWith('Still failing: HTTP 403 ')).toBe(true);
+  });
+
+  it('says a disabled key that works is still disabled and points at Enable', () => {
+    expect(keyTestToast(ok('disabled'))).toEqual({
+      kind: 'success',
+      text: 'Key works. Still disabled. Press Enable to use it. (412 ms)',
+    });
+  });
+
+  it('says a disabled key that fails is still disabled', () => {
+    expect(keyTestToast(fail('disabled', 403, 'blocked'))).toEqual({
+      kind: 'error',
+      text: 'Still failing: HTTP 403 blocked. Still disabled.',
+    });
+  });
+
+  it('uses the message when there is no HTTP status (a network error)', () => {
+    expect(keyTestToast(fail('invalid', 0, undefined, 'network error: boom'))).toEqual({
+      kind: 'error',
+      text: 'Still failing: network error: boom. Still dropped.',
+    });
+  });
+
+  it('keeps the plain message for any other key status', () => {
+    expect(keyTestToast(ok('active'))).toEqual({ kind: 'success', text: 'Key works (412 ms)' });
+    expect(keyTestToast(fail('exhausted', 402, 'no credit', 'No balance'))).toEqual({
+      kind: 'error',
+      text: 'No balance (412 ms)',
+    });
+  });
+
+  it('keeps the plain message when key_status is missing', () => {
+    expect(keyTestToast({ ok: true, message: 'Key works', ms: 9, status: 200 })).toEqual({
+      kind: 'success',
+      text: 'Key works (9 ms)',
+    });
+  });
+});
+
+describe('plain action names in stored and test text (D-13)', () => {
+  it('replaces a raw action name in a stored key reason', () => {
+    expect(keyReasonLine(key({ status: 'invalid', status_reason: 'All failed (A/k: INVALID_KEY)' }))).toBe(
+      'All failed (A/k: Drop key until I re-enable it)',
+    );
+  });
+
+  it('replaces a raw action name in the Overview detail text', () => {
+    const out = keyDetailText(key({ status: 'invalid', status_reason: 'EXHAUSTED on try', status_code: 403, status_changed_at: NOW - HOUR }));
+    expect(out).toBe('HTTP 403 · Mark out of balance (auto-recheck) on try · dropped 1h ago');
+    expect(out).not.toMatch(/EXHAUSTED/);
+  });
+
+  it('replaces a raw action name in a dropped key message line', () => {
+    expect(keyDropLines(key({ status: 'invalid', status_reason: 'RATE_LIMITED', status_code: 429 })).message).toBe(
+      'Pause key for N min',
+    );
   });
 });
