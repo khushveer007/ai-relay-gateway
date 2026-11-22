@@ -3,7 +3,7 @@ import { Button } from '@/components/ui/button';
 import { ActionBadge, HttpStatusBadge } from '@/components/status-badge';
 import { ResponsiveDialog } from '@/components/responsive-dialog';
 import type { LogRowDTO } from '@/lib/api';
-import { fmtMs, fmtTime, fmtTokensOrDash } from '@/lib/format';
+import { fmtMs, fmtTime, fmtTokensOrDash, plainActionText } from '@/lib/format';
 import { logModelLine } from '@/lib/logs-filters';
 import type { LogLabels } from './log-columns';
 
@@ -70,7 +70,7 @@ export function LogDetailDialog({ log, labels, open, onOpenChange }: LogDetailDi
             <Row label="Status">
               <HttpStatusBadge status={log.status} />
             </Row>
-            {log.error ? <Row label="Error">{log.error}</Row> : null}
+            {log.error ? <Row label="Error">{plainActionText(log.error)}</Row> : null}
             {log.failovers > 0 ? <Row label="Failovers">{log.failovers}</Row> : null}
           </dl>
         </Section>
@@ -93,7 +93,7 @@ export function LogDetailDialog({ log, labels, open, onOpenChange }: LogDetailDi
         <Section title="Attempts">
           {attempts.length === 0 ? (
             <p className="text-sm break-words text-muted-foreground">
-              No upstream attempts recorded. {log.error ?? 'Rejected before reaching an upstream.'}
+              No upstream attempts recorded. {log.error ? plainActionText(log.error) : 'Rejected before reaching an upstream.'}
             </p>
           ) : (
             <ol className="flex flex-col gap-2">
@@ -108,7 +108,7 @@ export function LogDetailDialog({ log, labels, open, onOpenChange }: LogDetailDi
                   <p className="text-sm break-words">
                     {a.provider} · {a.key} · model {a.model || DASH}
                   </p>
-                  {a.reason ? <p className="text-xs break-words text-muted-foreground">{a.reason}</p> : null}
+                  {a.reason ? <p className="text-xs break-words text-muted-foreground">{plainActionText(a.reason)}</p> : null}
                 </li>
               ))}
             </ol>

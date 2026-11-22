@@ -3,7 +3,7 @@ import { Button } from '@/components/ui/button';
 import { KeyStatusBadge } from '@/components/status-badge';
 import { ResponsiveList, TruncatedText, type ResponsiveColumn } from '@/components/responsive-list';
 import { useEnableKey, useTestKey } from '@/hooks/use-key-actions';
-import { fmtAgo, fmtBalance, fmtNum } from '@/lib/format';
+import { enableLabel, fmtAgo, fmtBalance, fmtNum } from '@/lib/format';
 import { keyDetailText, keyLabel, type Range } from '@/lib/overview';
 import type { ProviderDTO, ProviderKeyDTO, StatsDTO } from '@/lib/api';
 
@@ -71,9 +71,7 @@ export function KeyMatrix({ range, providers, stats, isLoading, providersFailed 
     {
       key: 'detail',
       header: 'Detail / Cooldown',
-      cell: ({ key }) => (
-        <TruncatedText className="max-w-[280px]" text={keyDetailText(key)} />
-      ),
+      cell: ({ key }) => <span className="block max-w-[280px] break-words">{keyDetailText(key)}</span>,
     },
   ];
 
@@ -108,7 +106,7 @@ export function KeyMatrix({ range, providers, stats, isLoading, providersFailed 
                     disabled={enablePending}
                     onClick={() => enableKey.mutate(row.key.id)}
                   >
-                    Enable
+                    {enablePending ? (row.key.status === 'invalid' ? 'Re-enabling…' : 'Enabling…') : enableLabel(row.key.status)}
                   </Button>
                 ) : null}
                 <Button

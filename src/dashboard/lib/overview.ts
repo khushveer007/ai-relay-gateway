@@ -1,6 +1,6 @@
 // Pure Overview helpers. DOM-free; relative imports only (Vitest has no alias, and the Worker
 // tsconfig that type-checks test/ has no DOM lib).
-import { fmtAgo, fmtDateTime } from './format';
+import { fmtAgo, fmtDateTime, plainActionText } from './format';
 
 export const RANGES = ['1h', '24h', '7d'] as const;
 export type Range = (typeof RANGES)[number];
@@ -126,7 +126,7 @@ export function keyDropLines(key: KeyTextInput): { meta: string | null; message:
   const parts = [code ? `HTTP ${code}` : null, when].filter((p): p is string => p !== null);
   return {
     meta: parts.length > 0 ? parts.join(' · ') : null,
-    message: key.status_reason ? key.status_reason : null,
+    message: key.status_reason ? plainActionText(key.status_reason) : null,
   };
 }
 
@@ -135,12 +135,12 @@ export function keyDetailText(key: KeyTextInput): string {
     const code = dropCode(key);
     const parts = [
       code ? `HTTP ${code}` : null,
-      key.status_reason ? key.status_reason : null,
+      key.status_reason ? plainActionText(key.status_reason) : null,
       key.status_changed_at ? `dropped ${fmtAgo(key.status_changed_at)}` : null,
     ].filter((p): p is string => p !== null);
     return parts.length > 0 ? parts.join(' · ') : 'Dropped';
   }
-  let detail = key.status_reason ? key.status_reason : 'Healthy';
+  let detail = key.status_reason ? plainActionText(key.status_reason) : 'Healthy';
   if (key.status === 'rate_limited' && key.cooldown_until) {
     detail += ` · cools down ${fmtAgo(key.cooldown_until)}`;
   } else if (key.status === 'exhausted' && key.next_recheck_at) {
@@ -156,12 +156,42 @@ export function keyDetailText(key: KeyTextInput): string {
  */
 export function keyReasonLine(key: KeyTextInput): string | null {
   if (!key.status_reason) return null;
+  const reason = plainActionText(key.status_reason);
   const now = Date.now();
   if (key.status === 'rate_limited' && key.cooldown_until && key.cooldown_until > now) {
-    return `${key.status_reason} · back ${fmtAgo(key.cooldown_until)}`;
+    return `${reason} · back ${fmtAgo(key.cooldown_until)}`;
   }
   if (key.status === 'exhausted' && key.next_recheck_at && key.next_recheck_at > now) {
-    return `${key.status_reason} · recheck ${fmtAgo(key.next_recheck_at)}`;
+    return `${reason} · recheck ${fmtAgo(key.next_recheck_at)}`;
   }
-  return key.status_reason;
+  return reason;
+}
+
+/** The answer of POST /keys/:id/test that the toast reads. `key_status` is the status before the test. */
+export interface KeyTestResultLike {
+  ok: boolean;
+  message: string;
+  ms: number;
+  status: number;
+  key_status?: string;
+  cls?: { reason: string };
+}
+
+/**
+ * The Test toast for a key (DROP-10, E8). A dropped or disabled key never reads as back in service: the
+ * copy says it is still dropped or disabled, and no button offers a re-enable (test-then-re-enable is v2).
+ * Any other key keeps the plain "{message} ({ms} ms)" text.
+ */
+export function keyTestToast(res: KeyTestResultLike): { kind: 'success' | 'error'; text: string } {
+  const kind = res.ok ? 'success' : 'error';
+  if (res.key_status === 'invalid' || res.key_status === 'disabled') {
+    const still = res.key_status === 'invalid' ? 'dropped' : 'disabled';
+    if (res.ok) {
+      const press = res.key_status === 'invalid' ? 'Re-enable' : 'Enable';
+      return { kind, text: `Key works. Still ${still}. Press ${press} to use it. (${res.ms} ms)` };
+    }
+    const detail = res.status > 0 && res.cls?.reason ? `HTTP ${res.status} ${res.cls.reason}` : res.message;
+    return { kind, text: `Still failing: ${detail}. Still ${still}.` };
+  }
+  return { kind, text: `${res.message} (${res.ms} ms)` };
 }
