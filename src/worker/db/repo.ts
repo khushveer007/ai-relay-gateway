@@ -184,12 +184,19 @@ export interface KeyStatePatch {
   next_recheck_at: number | null;
 }
 
-export function keyStateStmt(db: D1Database, keyId: number, patch: KeyStatePatch, now: number): D1PreparedStatement {
+/**
+ * Builds the key-state UPDATE. An unforced write (the proxy, cron, recheck, Test and admin Disable) adds a
+ * status guard to the WHERE clause that excludes the invalid and disabled statuses. D1 then refuses to move a
+ * dropped or disabled key even when the caller's cached copy still says active. The D1 row is the one source
+ * of truth across isolates (DROP-01). The guard adds no bind, so the bind order stays the same for both forms.
+ */
+export function keyStateStmt(db: D1Database, keyId: number, patch: KeyStatePatch, now: number, force = false): D1PreparedStatement {
+  const guard = force ? '' : " AND status NOT IN ('invalid','disabled')";
   return db
     .prepare(
       `UPDATE provider_keys
          SET status = ?, status_reason = ?, cooldown_until = ?, next_recheck_at = ?, status_changed_at = ?
-       WHERE id = ?`,
+       WHERE id = ?${guard}`,
     )
     .bind(patch.status, patch.status_reason, patch.cooldown_until, patch.next_recheck_at, now, keyId);
 }
