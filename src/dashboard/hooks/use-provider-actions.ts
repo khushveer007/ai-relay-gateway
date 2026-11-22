@@ -13,7 +13,11 @@ export function useUpdateProvider(providerId: number) {
     onSuccess: () => {
       toast.success('Provider updated.');
     },
-    onSettled: () => queryClient.invalidateQueries({ queryKey: ['providers'] }),
+    onSettled: () =>
+      Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['providers'] }),
+        queryClient.invalidateQueries({ queryKey: ['rules'] }),
+      ]),
   });
 }
 

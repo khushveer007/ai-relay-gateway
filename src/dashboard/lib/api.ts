@@ -40,6 +40,8 @@ export interface ProviderDTO {
   timeout_ms: number;
   extra_headers: Record<string, string>;
   enabled: boolean;
+  drop_codes: string;
+  drop_message: string;
   created_at: number;
   keys: ProviderKeyDTO[];
   routes: string[];
