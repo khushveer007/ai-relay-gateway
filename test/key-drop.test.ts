@@ -862,7 +862,7 @@ describe('provider create is atomic with its drop rule (real local D1)', () => {
     return Number(row?.n ?? 0);
   }
 
-  it('a drop-rule insert failure rolls back the provider, its keys, the route link and the version (D-04)', async () => {
+  it('a drop-rule insert failure rolls back provider creation (D-04)', async () => {
     const adminEnv = { ...proxy.env, ADMIN_PASSWORD: 'pw-create-rollback', SESSION_SECRET: 'sess-create-rollback' };
     const cookie = await cookieFor(adminEnv);
     const name = 'Rollback Relay';

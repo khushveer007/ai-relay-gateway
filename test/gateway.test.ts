@@ -302,6 +302,7 @@ describe('Full Proxy Failover & Admin Integration', () => {
   let providerInserts: unknown[][];
   let providerUpdates: unknown[][];
   let ruleWrites: Array<{ sql: string; bound: unknown[] }>;
+  let batchSizes: number[];
   let env: Env;
 
   beforeEach(async () => {
@@ -313,6 +314,7 @@ describe('Full Proxy Failover & Admin Integration', () => {
     providerInserts = [];
     providerUpdates = [];
     ruleWrites = [];
+    batchSizes = [];
 
     const k1Enc = await encrypt('sk-provA-key1', ENC_SECRET);
     const k2Enc = await encrypt('sk-provA-key2', ENC_SECRET);
@@ -452,6 +454,7 @@ describe('Full Proxy Failover & Admin Integration', () => {
       prepare: fakePrepare,
       async batch(stmts: any[]) {
         const out = [];
+        batchSizes.push(stmts.length);
         for (const s of stmts) {
           if (/UPDATE|INSERT|DELETE/.test(s.sql)) {
             out.push(await s.run());
@@ -1520,9 +1523,12 @@ describe('Full Proxy Failover & Admin Integration', () => {
         const cookie = await adminCookie();
         const res = await adminJson(cookie, 'PUT', '/providers/1', { drop_codes: '403, 418', drop_message: '' });
         expect(res.status).toBe(200);
-        expect(providerUpdates).toHaveLength(0);
+        // The provider UPDATE and the rule DELETE and INSERT all belong to the one save (DROP-07).
+        expect(providerUpdates).toHaveLength(1);
         expect(ruleWrites.map((w) => (w.sql.startsWith('DELETE') ? 'DELETE' : 'INSERT'))).toEqual(['DELETE', 'INSERT']);
         expect(ruleWrites[1].bound).toContain('403,418');
+        // One batch: the UPDATE, the DELETE, the INSERT and the version bump. A second batch would make this 2 or more.
+        expect(batchSizes).toEqual([4]);
       });
 
       it('GET /providers shows the drop list on its provider and empty strings on a provider without one (DROP-06)', async () => {

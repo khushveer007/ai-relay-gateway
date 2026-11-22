@@ -5,7 +5,9 @@ import { invalidateConfig, plainKey } from '../db/cache';
 import { decrypt, encrypt, keyHint, randomToken, sha256Hex } from '../db/crypto';
 import { bumpVersionStmt, loadConfig, parseGatewayKey, parseKey, parseProvider, parseRule, parseSettings } from '../db/repo';
 import { classify, validateRegex } from '../routing/error-rules';
+import { dropListStmts, parseDropList } from '../routing/drop-list';
 import { ACTIVE_PATCH, applyKeyPatch, patchForAction } from '../routing/key-state';
+import { parseStatusCodes } from '../../dashboard/lib/status-codes';
 import { ALL_ACTIONS, ALL_FORMATS, type Env, type Provider, type ProviderKey } from '../types';
 import { checkPassword, clearSessionCookie, createSession, loginBlocked, recordLoginFailure, requireAdmin, setSessionCookie } from './auth';
 import { getStats } from './stats';
@@ -151,6 +153,37 @@ function splitKeys(text: unknown): string[] {
   return text.split(/[\s,;]+/).map((s) => s.trim()).filter(Boolean);
 }
 
+/**
+ * The encrypted key INSERT statements for a provider. The provider is a numeric id for an existing provider, or its
+ * unique name for a create, where a bound subquery finds the id inside the same batch. Fresh keys only: the caller
+ * removes duplicates first. Priorities start after `startPriority`, so a create starts at 0.
+ */
+async function keyInsertStmts(
+  env: Env,
+  providerRef: number | string,
+  fresh: string[],
+  startPriority: number,
+  aliasPrefix?: string | null,
+): Promise<D1PreparedStatement[]> {
+  const providerSql = typeof providerRef === 'string' ? '(SELECT id FROM providers WHERE name = ?)' : '?';
+  const stmts: D1PreparedStatement[] = [];
+  let i = 0;
+  for (const k of fresh) {
+    i++;
+    const alias = aliasPrefix ? `${aliasPrefix} ${startPriority + 1 + i}` : '';
+    stmts.push(
+      env.DB.prepare(`INSERT INTO provider_keys (provider_id, alias, key_enc, key_hint, priority) VALUES (${providerSql}, ?, ?, ?, ?)`).bind(
+        providerRef,
+        alias,
+        await encrypt(k, env.ENCRYPTION_KEY),
+        keyHint(k),
+        startPriority + i,
+      ),
+    );
+  }
+  return stmts;
+}
+
 async function insertKeys(env: Env, providerId: number, raw: string[], aliasPrefix?: string | null) {
   const existingRows = await env.DB.prepare('SELECT key_enc, priority FROM provider_keys WHERE provider_id = ?').bind(providerId).all();
   const existing = new Set<string>();
@@ -164,21 +197,7 @@ async function insertKeys(env: Env, providerId: number, raw: string[], aliasPref
     }
   }
   const fresh = [...new Set(raw)].filter((k) => !existing.has(k));
-  const stmts: D1PreparedStatement[] = [];
-  let i = 0;
-  for (const k of fresh) {
-    i++;
-    const alias = aliasPrefix ? `${aliasPrefix} ${maxPriority + 1 + i}` : '';
-    stmts.push(
-      env.DB.prepare('INSERT INTO provider_keys (provider_id, alias, key_enc, key_hint, priority) VALUES (?, ?, ?, ?, ?)').bind(
-        providerId,
-        alias,
-        await encrypt(k, env.ENCRYPTION_KEY),
-        keyHint(k),
-        maxPriority + i,
-      ),
-    );
-  }
+  const stmts = await keyInsertStmts(env, providerId, fresh, maxPriority, aliasPrefix);
   if (stmts.length) await mutate(env, stmts);
   return { added: fresh.length, duplicates: raw.length - fresh.length };
 }
@@ -241,10 +260,19 @@ s.get('/session', (c) => c.json({ ok: true }));
 
 s.get('/providers', async (c) => {
   const cfg = await loadConfig(c.env.DB);
+  // A provider's drop list is its one drop-list rule (origin drop_list). The list shows it as codes and message text.
+  const dropByProvider = new Map<number, { codes: string; message: string }>();
+  for (const r of cfg.rules) {
+    if (r.origin === 'drop_list' && r.provider_id !== null) {
+      dropByProvider.set(r.provider_id, { codes: r.status_codes, message: r.note ?? '' });
+    }
+  }
   const providers = [...cfg.providers.values()].map((p) => ({
     ...p,
     keys: (cfg.keysByProvider.get(p.id) ?? []).map(publicKey),
     routes: cfg.routes.filter((r) => r.provider_ids.includes(p.id)).map((r) => r.name),
+    drop_codes: dropByProvider.get(p.id)?.codes ?? '',
+    drop_message: dropByProvider.get(p.id)?.message ?? '',
   }));
   return c.json({ providers });
 });
@@ -252,31 +280,37 @@ s.get('/providers', async (c) => {
 s.post('/providers', async (c) => {
   const b = await body(c);
   const cols = providerColumns(b);
+  const dl = parseDropList(b.drop_codes, b.drop_message);
+  if (dl.error) throw bad(dl.error);
   const names = Object.keys(cols);
-  const [res] = await mutate(c.env, [
+  const keys = splitKeys(b.keys);
+  const aliasPrefix = str(b.alias_prefix, 'alias_prefix', { max: 40 });
+  const defaultRoute = b.add_to_default !== false ? await c.env.DB.prepare('SELECT id FROM routes WHERE is_default = 1 LIMIT 1').first<{ id: number }>() : null;
+
+  // One batch: provider, submitted keys, default-route link and drop rule, then the version bump (D-04). The child
+  // statements find the new provider by its unique name inside the batch, so a failed rule INSERT rolls back all of it.
+  const freshKeys = [...new Set(keys)];
+  const stmts: D1PreparedStatement[] = [
     c.env.DB.prepare(`INSERT INTO providers (${names.join(', ')}) VALUES (${names.map(() => '?').join(', ')}) RETURNING id`).bind(
       ...Object.values(cols),
     ),
-  ]);
+  ];
+  stmts.push(...(await keyInsertStmts(c.env, cols.name, freshKeys, -1, aliasPrefix)));
+  if (defaultRoute) {
+    stmts.push(
+      c.env.DB.prepare(
+        'INSERT OR IGNORE INTO route_providers (route_id, provider_id, position) VALUES (?, (SELECT id FROM providers WHERE name = ?), (SELECT COALESCE(MAX(position), -1) + 1 FROM route_providers WHERE route_id = ?))',
+      ).bind(defaultRoute.id, cols.name, defaultRoute.id),
+    );
+  }
+  stmts.push(...dropListStmts(c.env.DB, cols.name, dl));
+  const [res] = await mutate(c.env, stmts);
   const id = Number((res.results[0] as { id: number }).id);
 
-  if (b.add_to_default !== false) {
-    const def = await c.env.DB.prepare('SELECT id FROM routes WHERE is_default = 1 LIMIT 1').first<{ id: number }>();
-    if (def) {
-      await mutate(c.env, [
-        c.env.DB.prepare(
-          'INSERT OR IGNORE INTO route_providers (route_id, provider_id, position) VALUES (?, ?, (SELECT COALESCE(MAX(position), -1) + 1 FROM route_providers WHERE route_id = ?))',
-        ).bind(def.id, id, def.id),
-      ]);
-    }
-  }
-
-  const keys = splitKeys(b.keys);
-  let keyResult = { added: 0, duplicates: 0 };
+  const keyResult = { added: freshKeys.length, duplicates: keys.length - freshKeys.length };
   let models: string[] | null = null;
   let modelsError: string | null = null;
   if (keys.length) {
-    keyResult = await insertKeys(c.env, id, keys, str(b.alias_prefix, 'alias_prefix', { max: 40 }));
     try {
       models = await refreshModels(c.env, await getProvider(c.env, id), keys[0]);
     } catch (e) {
@@ -323,9 +357,13 @@ s.post('/providers/test-connection', async (c) => {
 s.put('/providers/:id', async (c) => {
   const id = idParam(c.req.param('id'));
   const existing = await getProvider(c.env, id);
-  const cols = providerColumns(await body(c), existing);
+  const b = await body(c);
+  const cols = providerColumns(b, existing);
+  const dl = parseDropList(b.drop_codes, b.drop_message);
+  if (dl.error) throw bad(dl.error);
   await mutate(c.env, [
     c.env.DB.prepare(`UPDATE providers SET ${Object.keys(cols).map((k) => `${k} = ?`).join(', ')} WHERE id = ?`).bind(...Object.values(cols), id),
+    ...dropListStmts(c.env.DB, id, dl),
   ]);
   return c.json({ ok: true });
 });
@@ -528,8 +566,12 @@ s.get('/rules', async (c) => {
 
 function ruleInput(b: Record<string, any>) {
   if (!ALL_ACTIONS.includes(b.action)) throw bad(`action must be one of ${ALL_ACTIONS.join(', ')}`);
-  const status_codes = (str(b.status_codes, 'status_codes', { max: 100 }) ?? '').replace(/\s+/g, '');
-  if (status_codes && !/^(\d{3}(-\d{3})?)(,\d{3}(-\d{3})?)*$/.test(status_codes)) throw bad('status_codes must look like "402" or "401,403" or "500-599"');
+  // Codes typed with spaces or commas are normalized to commas by the shared parser (DROP-06). Range 100 to 999
+  // keeps the rule form broad, since an operator rule is not limited to the drop-list range.
+  const typed = str(b.status_codes, 'status_codes', { max: 100 }) ?? '';
+  const parsed = parseStatusCodes(typed, { min: 100, max: 999 });
+  if (parsed.error) throw bad('status_codes must look like "402" or "401,403" or "500-599"');
+  const status_codes = parsed.codes;
   const body_regex = str(b.body_regex, 'body_regex', { max: 2000 });
   if (body_regex) {
     const err = validateRegex(body_regex);
@@ -555,8 +597,17 @@ s.post('/rules', async (c) => {
   return c.json({ ok: true }, 201);
 });
 
+/** A drop-list row belongs to its provider page. Rules can't edit or delete it, so a rule edit cannot wipe a drop list (T-03-13). */
+async function refuseDropListRule(env: Env, id: number): Promise<void> {
+  const row = await env.DB.prepare('SELECT origin FROM error_rules WHERE id = ?').bind(id).first<{ origin: string }>();
+  if (row?.origin === 'drop_list') {
+    throw new HttpError(409, "This rule comes from a provider's drop list. Edit it in the provider.");
+  }
+}
+
 s.put('/rules/:id', async (c) => {
   const id = idParam(c.req.param('id'));
+  await refuseDropListRule(c.env, id);
   const r = ruleInput(await body(c));
   await mutate(c.env, [
     c.env.DB.prepare(`UPDATE error_rules SET ${Object.keys(r).map((k) => `${k} = ?`).join(', ')} WHERE id = ?`).bind(...Object.values(r), id),
@@ -565,7 +616,9 @@ s.put('/rules/:id', async (c) => {
 });
 
 s.delete('/rules/:id', async (c) => {
-  await mutate(c.env, [c.env.DB.prepare('DELETE FROM error_rules WHERE id = ?').bind(idParam(c.req.param('id')))]);
+  const id = idParam(c.req.param('id'));
+  await refuseDropListRule(c.env, id);
+  await mutate(c.env, [c.env.DB.prepare('DELETE FROM error_rules WHERE id = ?').bind(id)]);
   return c.json({ ok: true });
 });
 
