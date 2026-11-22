@@ -65,7 +65,7 @@ export function KeyRow({ keyDto, index, count, reordering, onMove }: KeyRowProps
         </div>
       </div>
       {dropLines ? (
-        <div className="flex min-w-0 flex-col gap-0.5 md:col-span-2 md:row-start-2">
+        <div className="flex min-w-0 flex-col gap-1 md:col-span-2 md:row-start-2">
           {dropLines.meta ? <p className="text-xs break-words text-muted-foreground">{dropLines.meta}</p> : null}
           {dropLines.message ? <p className="text-xs break-words text-muted-foreground">{dropLines.message}</p> : null}
         </div>

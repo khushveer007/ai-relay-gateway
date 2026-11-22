@@ -19,7 +19,7 @@ export const fieldMessageId = (htmlFor: string) => `${htmlFor}-message`;
 export function Field({ label, htmlFor, helper, error, className, children }: FieldProps) {
   return (
     <div className={cn('flex min-w-0 flex-col gap-2', className)}>
-      <Label htmlFor={htmlFor}>{label}</Label>
+      <Label htmlFor={htmlFor} className="leading-[1.4]">{label}</Label>
       {children}
       {error ? (
         <p id={fieldMessageId(htmlFor)} className="text-xs break-words text-destructive">

@@ -294,7 +294,7 @@ export function ProviderFormDialog({ open, onOpenChange, mode, provider, initial
         <Collapsible open={dropOpen} onOpenChange={setDropOpen} className="flex flex-col gap-4">
           <CollapsibleTrigger asChild>
             <Button type="button" variant="outline" className="h-auto min-h-11 w-full justify-between py-2 text-left whitespace-normal" aria-expanded={dropOpen}>
-              <span className="flex min-w-0 flex-col items-start gap-0.5">
+              <span className="flex min-w-0 flex-col items-start gap-1">
                 <span>Drop keys</span>
                 <span className="text-xs font-normal wrap-anywhere text-muted-foreground">
                   {dropSummary(form) || 'Status codes that switch a key off until you re-enable it'}
