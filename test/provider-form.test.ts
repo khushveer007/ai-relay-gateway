@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ProviderDTO } from '../src/dashboard/lib/api';
+import * as providerForm from '../src/dashboard/lib/provider-form';
 import {
   PROVIDER_FORMATS,
   buildProviderPayload,
@@ -159,10 +160,59 @@ describe('validateProviderForm', () => {
     expect(validateProviderForm(form, 'edit').drop_codes).toBe(expected);
   });
 
-  it('D-07 accepts risky codes in the form', () => {
-    const form = { ...emptyProviderForm(), drop_codes: '400, 429, 500-503' };
-    expect(validateProviderForm(form, 'edit').drop_codes).toBeUndefined();
+});
+
+describe('dropSummary (D-01)', () => {
+  it.each([
+    ['', '', ''],
+    ['', 'quota', ''],
+    ['403 418', '', 'Drops on 403, 418'],
+    ['403 418', ' quota ', 'Drops on 403, 418 · message contains “quota”'],
+  ])('summarizes codes %j and message %j', (drop_codes, drop_message, expected) => {
+    expect(providerForm).toHaveProperty('dropSummary', expect.any(Function));
+    expect(providerForm.dropSummary({ drop_codes, drop_message })).toBe(expected);
   });
+});
+
+describe('globalDropNote (D-03)', () => {
+  const codeRule = { provider_id: null, action: 'INVALID_KEY', enabled: true, status_codes: '401', body_regex: null };
+  const messageRule = { ...codeRule, status_codes: '', body_regex: 'invalid key' };
+  const nonDropRules = [
+    { ...codeRule, status_codes: '402', action: 'EXHAUSTED' },
+    { ...codeRule, status_codes: '403', enabled: false },
+    { ...codeRule, status_codes: '404', provider_id: 1 },
+  ];
+
+  it('describes only enabled global drop rules', () => {
+    expect(providerForm).toHaveProperty('globalDropNote', expect.any(Function));
+    expect(providerForm.globalDropNote([codeRule, messageRule, ...nonDropRules])).toBe(
+      'Every provider already drops a key on 401, and on some error messages. A code you add here is checked first.',
+    );
+    expect(providerForm.globalDropNote(nonDropRules)).toBe('No global rule drops a key. Only this list does.');
+  });
+
+  it('describes codes and messages independently', () => {
+    expect(providerForm).toHaveProperty('globalDropNote', expect.any(Function));
+    expect(providerForm.globalDropNote([codeRule])).toBe(
+      'Every provider already drops a key on 401. A code you add here is checked first.',
+    );
+    expect(providerForm.globalDropNote([messageRule])).toBe(
+      'Every provider already drops a key on some error messages. A code you add here is checked first.',
+    );
+  });
+
+  it('deduplicates codes and sorts intact ranges by their start', () => {
+    expect(providerForm).toHaveProperty('globalDropNote', expect.any(Function));
+    expect(providerForm.globalDropNote([{ ...codeRule, status_codes: '403,400-402,401' }, codeRule])).toBe(
+      'Every provider already drops a key on 400-402, 401, 403. A code you add here is checked first.',
+    );
+  });
+});
+
+it('D-07 a risky code never blocks Save', () => {
+  const form = { ...emptyProviderForm(), name: 'Relay', base_url: 'https://r.test', drop_codes: '400, 429, 500-503' };
+  expect(validateProviderForm(form, 'edit')).toEqual({});
+  expect(buildProviderPayload(form, 'edit').drop_codes).toBe('400,429,500-503');
 });
 
 describe('testReducer (PRV-04 concurrency)', () => {
