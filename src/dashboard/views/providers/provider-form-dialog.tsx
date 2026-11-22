@@ -15,6 +15,7 @@ import {
   ADVANCED_FIELDS,
   DROP_FIELDS,
   buildProviderPayload,
+  dropSummary,
   emptyProviderForm,
   initialTestState,
   linesToMap,
@@ -295,7 +296,9 @@ export function ProviderFormDialog({ open, onOpenChange, mode, provider, initial
             <Button type="button" variant="outline" className="h-auto min-h-11 w-full justify-between py-2 text-left whitespace-normal" aria-expanded={dropOpen}>
               <span className="flex min-w-0 flex-col items-start gap-0.5">
                 <span>Drop keys</span>
-                <span className="text-xs font-normal text-muted-foreground">Status codes that switch a key off until you re-enable it</span>
+                <span className="text-xs font-normal wrap-anywhere text-muted-foreground">
+                  {dropSummary(form) || 'Status codes that switch a key off until you re-enable it'}
+                </span>
               </span>
               <ChevronDown aria-hidden="true" className={cn('transition-transform', dropOpen && 'rotate-180')} />
             </Button>

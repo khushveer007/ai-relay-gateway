@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { ProviderDTO } from '../src/dashboard/lib/api';
-import * as providerForm from '../src/dashboard/lib/provider-form';
 import {
   PROVIDER_FORMATS,
   buildProviderPayload,
+  dropSummary,
   emptyProviderForm,
+  globalDropNote,
   initialTestState,
   linesToMap,
   mapToLines,
@@ -159,7 +160,6 @@ describe('validateProviderForm', () => {
     const form = { ...emptyProviderForm(), drop_codes, drop_message };
     expect(validateProviderForm(form, 'edit').drop_codes).toBe(expected);
   });
-
 });
 
 describe('dropSummary (D-01)', () => {
@@ -169,8 +169,7 @@ describe('dropSummary (D-01)', () => {
     ['403 418', '', 'Drops on 403, 418'],
     ['403 418', ' quota ', 'Drops on 403, 418 · message contains “quota”'],
   ])('summarizes codes %j and message %j', (drop_codes, drop_message, expected) => {
-    expect(providerForm).toHaveProperty('dropSummary', expect.any(Function));
-    expect(providerForm.dropSummary({ drop_codes, drop_message })).toBe(expected);
+    expect(dropSummary({ drop_codes, drop_message })).toBe(expected);
   });
 });
 
@@ -184,26 +183,23 @@ describe('globalDropNote (D-03)', () => {
   ];
 
   it('describes only enabled global drop rules', () => {
-    expect(providerForm).toHaveProperty('globalDropNote', expect.any(Function));
-    expect(providerForm.globalDropNote([codeRule, messageRule, ...nonDropRules])).toBe(
+    expect(globalDropNote([codeRule, messageRule, ...nonDropRules])).toBe(
       'Every provider already drops a key on 401, and on some error messages. A code you add here is checked first.',
     );
-    expect(providerForm.globalDropNote(nonDropRules)).toBe('No global rule drops a key. Only this list does.');
+    expect(globalDropNote(nonDropRules)).toBe('No global rule drops a key. Only this list does.');
   });
 
   it('describes codes and messages independently', () => {
-    expect(providerForm).toHaveProperty('globalDropNote', expect.any(Function));
-    expect(providerForm.globalDropNote([codeRule])).toBe(
+    expect(globalDropNote([codeRule])).toBe(
       'Every provider already drops a key on 401. A code you add here is checked first.',
     );
-    expect(providerForm.globalDropNote([messageRule])).toBe(
+    expect(globalDropNote([messageRule])).toBe(
       'Every provider already drops a key on some error messages. A code you add here is checked first.',
     );
   });
 
   it('deduplicates codes and sorts intact ranges by their start', () => {
-    expect(providerForm).toHaveProperty('globalDropNote', expect.any(Function));
-    expect(providerForm.globalDropNote([{ ...codeRule, status_codes: '403,400-402,401' }, codeRule])).toBe(
+    expect(globalDropNote([{ ...codeRule, status_codes: '403,400-402,401' }, codeRule])).toBe(
       'Every provider already drops a key on 400-402, 401, 403. A code you add here is checked first.',
     );
   });

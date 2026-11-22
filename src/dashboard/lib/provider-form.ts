@@ -1,7 +1,7 @@
 // Pure form model for the provider dialog. The Worker tsconfig type-checks test imports, so this
 // module imports only pure helpers. The API client needs DOM types the Worker lacks.
 
-import { DROP_CODE_ERRORS, DROP_MESSAGE_NEEDS_CODES, parseStatusCodes } from './status-codes';
+import { DROP_CODE_ERRORS, DROP_MESSAGE_NEEDS_CODES, normalizeCodes, parseStatusCodes } from './status-codes';
 
 /** Canonical wire-format order. The payload always lists formats in this order (PRV-02 ordering). */
 export const PROVIDER_FORMATS = ['anthropic', 'openai-chat', 'openai-responses'] as const;
@@ -250,6 +250,39 @@ export function providerToForm(dto: ProviderDtoLike): ProviderForm {
 /** Field names that live inside the collapsed Advanced section; the dialog opens it for these. */
 export const ADVANCED_FIELDS: readonly FormErrorKey[] = ['formats', 'timeout_ms', 'recheck_hours', 'balance_divisor', 'model_map', 'extra_headers'];
 export const DROP_FIELDS: readonly FormErrorKey[] = ['drop_codes'];
+
+export function dropSummary(form: Pick<ProviderForm, 'drop_codes' | 'drop_message'>): string {
+  const codes = normalizeCodes(form.drop_codes);
+  if (!codes) return '';
+  const message = form.drop_message.trim();
+  return `Drops on ${codes.split(',').join(', ')}${message ? ` · message contains “${message}”` : ''}`;
+}
+
+interface GlobalDropRule {
+  provider_id: number | null;
+  action: string;
+  enabled: boolean;
+  status_codes: string;
+  body_regex: string | null;
+}
+
+export function globalDropNote(rules: readonly GlobalDropRule[]): string {
+  const codes = new Set<string>();
+  let hasMessage = false;
+  for (const rule of rules) {
+    if (rule.provider_id !== null || rule.action !== 'INVALID_KEY' || !rule.enabled) continue;
+    for (const code of normalizeCodes(rule.status_codes).split(',')) {
+      if (code) codes.add(code);
+    }
+    if (rule.body_regex) hasMessage = true;
+  }
+
+  if (!codes.size && !hasMessage) return 'No global rule drops a key. Only this list does.';
+  const sorted = [...codes].sort((a, b) => Number(a.split('-')[0]) - Number(b.split('-')[0]));
+  const codeList = sorted.join(', ');
+  const matches = hasMessage ? [codeList, 'some error messages'].filter(Boolean).join(', and on ') : codeList;
+  return `Every provider already drops a key on ${matches}. A code you add here is checked first.`;
+}
 
 const inRange = (text: string, min: number, max: number): boolean => {
   if (text.trim() === '') return true; // blank means the default
