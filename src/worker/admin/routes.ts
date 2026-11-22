@@ -384,8 +384,13 @@ s.post('/providers/:id/check-balances', async (c) => {
   const results = [];
   for (const row of rows.results) {
     const key = parseKey(row);
+    // A dropped key is not balance-checked; the answer reports why instead of making a request (DROP-02).
+    if (key.status === 'invalid') {
+      results.push({ key_id: key.id, supported: false, balance: null, error: 'Key is dropped.' });
+      continue;
+    }
     const r = await checkBalance(c.env, provider, key);
-    await c.env.DB.prepare('UPDATE provider_keys SET balance = COALESCE(?, balance), balance_checked_at = ? WHERE id = ?')
+    await c.env.DB.prepare("UPDATE provider_keys SET balance = COALESCE(?, balance), balance_checked_at = ? WHERE id = ? AND status != 'invalid'")
       .bind(r.balance, now, key.id)
       .run();
     results.push({ key_id: key.id, ...r });
@@ -399,7 +404,9 @@ s.put('/keys/:id', async (c) => {
   if (b.alias !== undefined) {
     await mutate(c.env, [c.env.DB.prepare('UPDATE provider_keys SET alias = ? WHERE id = ?').bind(str(b.alias, 'alias', { max: 60 }) ?? '', key.id)]);
   }
-  if (b.status === 'active') await applyKeyPatch(c.env, key, ACTIVE_PATCH);
+  // Only an explicit Re-enable forces a dropped key back to active (DROP-03). Disable uses the default guard,
+  // so it leaves an existing or concurrently recorded drop intact.
+  if (b.status === 'active') await applyKeyPatch(c.env, key, ACTIVE_PATCH, Date.now(), true);
   else if (b.status === 'disabled') {
     await applyKeyPatch(c.env, key, { status: 'disabled', status_reason: 'disabled manually', cooldown_until: null, next_recheck_at: null });
   } else if (b.status !== undefined) throw bad('status must be "active" or "disabled"');
@@ -416,8 +423,10 @@ s.delete('/keys/:id', async (c) => {
 
 s.post('/keys/:id/check-balance', async (c) => {
   const { key, provider } = await getKey(c.env, idParam(c.req.param('id')));
+  // A dropped key is not balance-checked (DROP-02). Same response shape as a balance-unsupported answer.
+  if (key.status === 'invalid') return c.json({ supported: false, balance: null, error: 'Key is dropped.' });
   const r = await checkBalance(c.env, provider, key);
-  await c.env.DB.prepare('UPDATE provider_keys SET balance = COALESCE(?, balance), balance_checked_at = ? WHERE id = ?')
+  await c.env.DB.prepare("UPDATE provider_keys SET balance = COALESCE(?, balance), balance_checked_at = ? WHERE id = ? AND status != 'invalid'")
     .bind(r.balance, Date.now(), key.id)
     .run();
   return c.json(r);
@@ -425,15 +434,20 @@ s.post('/keys/:id/check-balance', async (c) => {
 
 s.post('/keys/:id/test', async (c) => {
   const { key, provider } = await getKey(c.env, idParam(c.req.param('id')));
+  // Read the status before any patch: applyKeyPatch mutates the key object in place (DROP-10).
+  const statusBefore = key.status;
   const cfg = await loadConfig(c.env.DB);
   const r = await testKey(c.env, provider, key, cfg.rules);
-  if (r.ok && key.status !== 'active') await applyKeyPatch(c.env, key, ACTIVE_PATCH);
-  else if (!r.ok && r.cls) {
-    const patch = patchForAction(provider, r.cls.action, r.cls.reason, r.cls.cooldownS);
-    if (patch) await applyKeyPatch(c.env, key, patch);
+  // A dropped or disabled key is report-only: the test result is returned, and no key write happens.
+  if (statusBefore !== 'invalid' && statusBefore !== 'disabled') {
+    if (r.ok && statusBefore !== 'active') await applyKeyPatch(c.env, key, ACTIVE_PATCH);
+    else if (!r.ok && r.cls) {
+      const patch = patchForAction(provider, r.cls.action, r.cls.reason, r.cls.cooldownS, Date.now());
+      if (patch) await applyKeyPatch(c.env, key, patch);
+    }
   }
   invalidateConfig();
-  return c.json(r);
+  return c.json({ ...r, key_status: statusBefore });
 });
 
 s.post('/keys/:id/recheck', async (c) => {
