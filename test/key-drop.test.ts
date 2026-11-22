@@ -225,11 +225,12 @@ describe('DROP-01 request-path guard (real local D1)', () => {
     expect((await rowOf(invalidId)).status).toBe('active');
   });
 
-  it('a failure seen by a stale isolate leaves the drop alone', async () => {
-    const id = await seedKey({ status: 'active' });
-    // This isolate caches the key as active.
+  it('a stale isolate cannot reactivate a key after another isolate drops it', async () => {
+    const id = await seedKey({ status: 'exhausted' });
+    // This isolate caches the key as exhausted.
     invalidateConfig();
-    await getConfig(env);
+    const staleConfig = await getConfig(env);
+    const staleCached = staleConfig.keysByProvider.get(provider.id)!.find((key) => key.id === id)!;
     const stale = await keyOf(id);
 
     // Another isolate drops the key in D1. That write does not bump config_version, so this cache is not told.
@@ -239,12 +240,36 @@ describe('DROP-01 request-path guard (real local D1)', () => {
       .run();
     const dropped = await rowOf(id);
 
-    await applyKeyPatch(env, stale, rateLimitedPatch(), NOW);
+    const reactivation = applyKeyPatch(env, stale, ACTIVE_PATCH, NOW);
+    expect(staleCached.status).toBe('exhausted');
+    expect(await reactivation).toBe(false);
 
     expect(await rowOf(id)).toEqual(dropped);
     const cfg = await getConfig(env);
     const seen = cfg.keysByProvider.get(provider.id)!.find((k) => k.id === id);
     expect(seen).toMatchObject({ status: 'invalid', status_reason: 'HTTP 401: bad key', status_changed_at: T_FIRST });
+  });
+
+  it('a detached diagnostic snapshot leaves a pending drop in the live cache', async () => {
+    const id = await seedKey({ status: 'exhausted' });
+    invalidateConfig();
+    const config = await getConfig(env);
+    const cached = config.keysByProvider.get(provider.id)!.find((key) => key.id === id)!;
+    const detached = await keyOf(id);
+    const initialVersion = config.version;
+
+    const drop = applyKeyPatch(env, cached, invalidPatch('HTTP 401: first reason'), T_FIRST);
+    const reactivation = applyKeyPatch(env, detached, ACTIVE_PATCH, T_SECOND);
+    try {
+      expect(cached).toMatchObject({ status: 'invalid', status_code: 401, status_changed_at: T_FIRST });
+      expect(config.version).toBe(initialVersion + 1);
+      expect(detached.status).toBe('exhausted');
+      expect(await reactivation).toBe(false);
+    } finally {
+      await drop;
+      invalidateConfig();
+    }
+    expect(await rowOf(id)).toMatchObject({ status: 'invalid', status_code: 401, status_changed_at: T_FIRST });
   });
 
   it('first drop wins: a later drop leaves the stored reason and time', async () => {
@@ -412,16 +437,30 @@ describe('DROP-01 request-path guard (real local D1)', () => {
     expect(await rowOf(raced)).toEqual(racedSnapshot);
     expect((await rowOf(raced)).status_code).toBe(403);
 
+    const enableRequest = () => new Request(`https://gw.test/api/admin/keys/${raced}`, {
+      method: 'PUT',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ status: 'active' }),
+    });
+    const failingDb = {
+      prepare: db.prepare.bind(db),
+      batch: vi.fn().mockRejectedValue(new Error('D1 write unavailable')),
+    } as unknown as D1Database;
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const config = await getConfig(adminEnv);
+    const cached = config.keysByProvider.get(provider.id)!.find((key) => key.id === raced)!;
+    try {
+      const failed = await worker.fetch(enableRequest(), { ...adminEnv, DB: failingDb }, ctx);
+      expect(failingDb.batch).toHaveBeenCalledTimes(1);
+      expect(failed.status).toBe(500);
+      expect(cached.status).toBe('invalid');
+      expect(await rowOf(raced)).toEqual(racedSnapshot);
+    } finally {
+      errorLog.mockRestore();
+    }
+
     // Explicit Re-enable through the same route clears the code and the reason.
-    const reenable = await worker.fetch(
-      new Request(`https://gw.test/api/admin/keys/${raced}`, {
-        method: 'PUT',
-        headers: { cookie, 'content-type': 'application/json' },
-        body: JSON.stringify({ status: 'active' }),
-      }),
-      adminEnv,
-      ctx,
-    );
+    const reenable = await worker.fetch(enableRequest(), adminEnv, ctx);
     expect(reenable.status).toBe(200);
     expect(await rowOf(raced)).toMatchObject({ status: 'active', status_code: null, status_reason: null });
   });
@@ -489,7 +528,7 @@ describe('DROP-01 request-path guard (real local D1)', () => {
         const afterDrop = await rowOf(id);
 
         releaseFetch();
-        await recheck;
+        expect(await recheck).toMatchObject({ key_id: id, result: 'skipped' });
 
         expect(await rowOf(id)).toEqual(afterDrop);
       } finally {

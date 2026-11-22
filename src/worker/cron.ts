@@ -26,6 +26,7 @@ export interface RecheckOutcome {
  */
 export async function recheckKey(env: Env, config: Config, provider: Provider, key: ProviderKey): Promise<RecheckOutcome> {
   if (key.status !== 'exhausted') return { key_id: key.id, result: 'skipped', detail: 'key is ' + key.status };
+  const skipped: RecheckOutcome = { key_id: key.id, result: 'skipped', detail: 'Key state changed during recheck.' };
   const now = Date.now();
   const bal = await checkBalance(env, provider, key);
   if (bal.balance !== null) {
@@ -34,7 +35,7 @@ export async function recheckKey(env: Env, config: Config, provider: Provider, k
       .run();
   }
   if (bal.balance !== null && bal.balance > 0) {
-    await applyKeyPatch(env, key, ACTIVE_PATCH);
+    if (!(await applyKeyPatch(env, key, ACTIVE_PATCH))) return skipped;
     return { key_id: key.id, result: 'reactivated', detail: `balance ${bal.balance}` };
   }
 
@@ -42,22 +43,23 @@ export async function recheckKey(env: Env, config: Config, provider: Provider, k
   if (bal.balance === null && provider.recheck_mode === 'auto') {
     const t = await testKey(env, provider, key, config.rules);
     if (t.ok) {
-      await applyKeyPatch(env, key, ACTIVE_PATCH);
+      if (!(await applyKeyPatch(env, key, ACTIVE_PATCH))) return skipped;
       return { key_id: key.id, result: 'reactivated', detail: `test request ok (${t.ms} ms)` };
     }
     detail += `; test: ${t.message}`;
     if (t.cls && t.cls.action !== 'EXHAUSTED') {
       const patch = patchForAction(provider, t.cls.action, t.cls.reason, t.cls.cooldownS, t.status, now);
       if (patch) {
-        await applyKeyPatch(env, key, patch);
+        if (!(await applyKeyPatch(env, key, patch))) return skipped;
         return { key_id: key.id, result: 'still_exhausted', detail };
       }
     }
   }
 
-  await env.DB.prepare("UPDATE provider_keys SET next_recheck_at = ? WHERE id = ? AND status = 'exhausted'")
+  const scheduled = await env.DB.prepare("UPDATE provider_keys SET next_recheck_at = ? WHERE id = ? AND status = 'exhausted'")
     .bind(now + provider.recheck_hours * 3_600_000, key.id)
     .run();
+  if (scheduled.meta.changes === 0) return skipped;
   return { key_id: key.id, result: 'still_exhausted', detail };
 }
 

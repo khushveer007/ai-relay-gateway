@@ -1,4 +1,4 @@
-import type { Config, Env, ProviderKey } from '../types';
+import type { Config, Env, KeyStatus, ProviderKey } from '../types';
 import { decrypt } from './crypto';
 import { getConfigVersion, loadConfig } from './repo';
 
@@ -77,20 +77,26 @@ export function invalidateConfig(): void {
   plainKeys.clear();
 }
 
-/** Applies a key-state change to the in-memory config so this isolate reacts instantly. */
-export function patchCachedKey(keyId: number, patch: Partial<ProviderKey>, bumpVersion = false): void {
-  if (!cached) return;
-  if (bumpVersion) {
-    cached.version += 1;
-    cached.settings.config_version = cached.version;
-  }
+export function isProtectedKeyStatus(status: KeyStatus): boolean {
+  return status === 'invalid' || status === 'disabled';
+}
+
+/** Checks the live key guard and applies an optimistic patch when provided. */
+export function patchCachedKey(keyId: number, patch?: Partial<ProviderKey>): boolean {
+  if (!cached) return true;
   for (const list of cached.keysByProvider.values()) {
     const k = list.find((x) => x.id === keyId);
     if (k) {
-      Object.assign(k, patch);
-      return;
+      if (isProtectedKeyStatus(k.status)) return false;
+      if (patch) Object.assign(k, patch);
+      break;
     }
   }
+  if (patch) {
+    cached.version += 1;
+    cached.settings.config_version = cached.version;
+  }
+  return true;
 }
 
 const plainKeys = new Map<string, string>();

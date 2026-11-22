@@ -444,8 +444,10 @@ s.put('/keys/:id', async (c) => {
   }
   // Only an explicit Re-enable forces a dropped key back to active (DROP-03). Disable uses the default guard,
   // so it leaves an existing or concurrently recorded drop intact.
-  if (b.status === 'active') await applyKeyPatch(c.env, key, ACTIVE_PATCH, Date.now(), true);
-  else if (b.status === 'disabled') {
+  if (b.status === 'active') {
+    const applied = await applyKeyPatch(c.env, key, ACTIVE_PATCH, Date.now(), true);
+    if (!applied) throw new HttpError(404, 'key not found');
+  } else if (b.status === 'disabled') {
     await applyKeyPatch(c.env, key, { status: 'disabled', status_reason: 'disabled manually', status_code: null, cooldown_until: null, next_recheck_at: null });
   } else if (b.status !== undefined) throw bad('status must be "active" or "disabled"');
   invalidateConfig();
