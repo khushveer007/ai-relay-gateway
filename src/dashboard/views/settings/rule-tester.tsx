@@ -47,8 +47,17 @@ export function RuleTester({ providers, rules }: { providers: ProviderDTO[]; rul
             test.mutate(buildTesterPayload(form));
           }}
         >
-          <Field label="Scope" htmlFor="tester-scope">
-            <NativeSelect id="tester-scope" value={form.provider_id} onChange={(e) => set({ provider_id: e.target.value })}>
+          <Field
+            label="Scope"
+            htmlFor="tester-scope"
+            helper="“All providers” tests global rules only. Select a provider to include its rules and drop list."
+          >
+            <NativeSelect
+              id="tester-scope"
+              value={form.provider_id}
+              aria-describedby={fieldMessageId('tester-scope')}
+              onChange={(e) => set({ provider_id: e.target.value })}
+            >
               <NativeSelectOption value="">All providers</NativeSelectOption>
               {providers.map((p) => (
                 <NativeSelectOption key={p.id} value={String(p.id)}>
