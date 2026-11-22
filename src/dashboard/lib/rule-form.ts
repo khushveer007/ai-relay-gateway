@@ -1,4 +1,7 @@
-// Pure settings and rule models: no imports, so Vitest and the Worker tsconfig can load them.
+import { actionLabel } from './format';
+import { parseStatusCodes } from './status-codes';
+
+// Pure settings and rule models shared with the tests.
 // The ranges mirror the Worker (PUT /settings, ruleInput) for UX only; the Worker still validates.
 
 export interface SettingsForm {
@@ -33,6 +36,7 @@ export interface RuleDtoLike {
   cooldown_s: number | null;
   note: string | null;
   enabled: boolean;
+  origin?: 'rule' | 'drop_list';
 }
 
 export interface TesterForm {
@@ -85,8 +89,34 @@ export function buildSettingsPayload(form: SettingsForm): Record<string, number>
 
 // ---------------------------------------------------------------- error rules
 
-const STATUS_PATTERN = /^(\d{3}(-\d{3})?)(,\d{3}(-\d{3})?)*$/;
-const noSpaces = (text: string): string => text.replace(/\s+/g, '');
+const RULE_CODE_RANGE = { min: 100, max: 999 };
+
+type NamedProvider = { id: number; name: string };
+
+function ruleScope(providerId: number | null, providers: readonly NamedProvider[]): string {
+  if (providerId === null) return 'All providers';
+  return providers.find((provider) => provider.id === providerId)?.name ?? `Provider #${providerId}`;
+}
+
+export function ruleSentence(
+  rule: Pick<RuleDtoLike, 'provider_id' | 'origin' | 'status_codes' | 'action' | 'cooldown_s' | 'body_regex' | 'note'>,
+  providers: readonly NamedProvider[],
+) {
+  const provider = ruleScope(rule.provider_id, providers);
+  const dropList = rule.origin === 'drop_list';
+  const status = rule.status_codes || 'any status';
+  const action = actionLabel(rule.action, { cooldownS: rule.cooldown_s });
+  const pauseSuffix = rule.action === 'RATE_LIMITED' ? ', then use it again' : '';
+
+  return {
+    scope: dropList ? `From ${provider}'s drop list` : provider,
+    sentence: `On ${status} → ${action}${pauseSuffix}`,
+    message: dropList
+      ? (rule.note ? `Message contains: ${rule.note}` : null)
+      : (rule.body_regex ? `Message matches: ${rule.body_regex}` : null),
+    note: dropList ? null : rule.note,
+  };
+}
 
 export function emptyRuleForm(firstAction: string): RuleForm {
   return { provider_id: '', priority: '25', status_codes: '', action: firstAction, cooldown_s: '60', body_regex: '', note: '', enabled: true };
@@ -107,9 +137,9 @@ export function ruleToForm(dto: RuleDtoLike): RuleForm {
 
 export function validateRuleForm(form: RuleForm): RuleErrors {
   const errors: RuleErrors = {};
-  const codes = noSpaces(form.status_codes);
-  if (codes && !STATUS_PATTERN.test(codes)) errors.status_codes = 'Use a code like 402, 401,403 or 500-599.';
-  if (!codes && !form.body_regex.trim()) errors.rule = 'Add a status code, a body regex, or both.';
+  const { codes, error } = parseStatusCodes(form.status_codes, RULE_CODE_RANGE);
+  if (error) errors.status_codes = 'Use a code like 402, 401,403 or 500-599.';
+  if (!error && !codes && !form.body_regex.trim()) errors.rule = 'Add a status code, a body regex, or both.';
   if (!wholeInRange(form.priority, 0, 100000)) errors.priority = 'Enter a priority from 0 to 100000.';
   if (form.action === 'RATE_LIMITED' && !wholeInRange(form.cooldown_s, 1, 604800)) errors.cooldown_s = 'Enter seconds from 1 to 604800.';
   return errors;
@@ -120,7 +150,7 @@ export function buildRulePayload(form: RuleForm): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     provider_id: form.provider_id ? Number(form.provider_id) : null,
     priority: parseNumber(form.priority),
-    status_codes: noSpaces(form.status_codes),
+    status_codes: parseStatusCodes(form.status_codes, RULE_CODE_RANGE).codes,
     action: form.action,
     body_regex: form.body_regex.trim() ? form.body_regex.trim() : null,
     note: form.note.trim() ? form.note.trim() : null,

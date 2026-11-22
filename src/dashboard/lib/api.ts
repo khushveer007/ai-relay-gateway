@@ -66,6 +66,7 @@ export interface ErrorRuleDTO {
   cooldown_s: number | null;
   note: string | null;
   enabled: boolean;
+  origin?: 'rule' | 'drop_list';
 }
 
 export interface GatewayKeyDTO {
