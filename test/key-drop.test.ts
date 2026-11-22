@@ -1,11 +1,13 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { getPlatformProxy } from 'wrangler';
 import migration from '../migrations/0001_init.sql?raw';
+import dropMigration from '../migrations/0002_key_drop.sql?raw';
 import { encrypt } from '../src/worker/db/crypto';
 import { getConfig, invalidateConfig } from '../src/worker/db/cache';
-import { keyStateStmt, parseKey, parseProvider, type KeyStatePatch } from '../src/worker/db/repo';
+import { keyStateStmt, parseKey, parseProvider, parseRule, type KeyStatePatch } from '../src/worker/db/repo';
+import { classify } from '../src/worker/routing/error-rules';
 import { ACTIVE_PATCH, applyKeyPatch, patchForAction } from '../src/worker/routing/key-state';
-import type { Env, Provider, ProviderKey } from '../src/worker/types';
+import type { Env, ErrorRule, Provider, ProviderKey } from '../src/worker/types';
 import worker from '../src/worker/index';
 
 type Row = Record<string, unknown>;
@@ -41,6 +43,35 @@ describe('DROP-01 request-path guard (real local D1)', () => {
       )
       .run();
     provider = parseProvider((await db.prepare("SELECT * FROM providers WHERE name = 'guard-provider'").first<Row>())!);
+
+    // Legacy rows, written before migration 0002 with plain INSERTs that name only 0001 columns. The migration
+    // must leave every one of them intact (DROP-04 empty edge: a key dropped before this phase reads status_code null).
+    const legacyEnc = await encrypt('sk-legacy-key', env.ENCRYPTION_KEY);
+    await db
+      .prepare(
+        "INSERT INTO provider_keys (id, provider_id, alias, key_enc, key_hint, status, status_reason, status_changed_at) VALUES (900, ?, 'legacy-invalid', ?, 'sk-leg...0000', 'invalid', 'HTTP 401: legacy bad key', ?)",
+      )
+      .bind(provider.id, legacyEnc, Date.UTC(2026, 10, 1))
+      .run();
+    await db
+      .prepare(
+        "INSERT INTO provider_keys (id, provider_id, alias, key_enc, key_hint, status, cooldown_until, next_recheck_at) VALUES (901, ?, 'legacy-exhausted', ?, 'sk-leg...0001', 'exhausted', NULL, ?)",
+      )
+      .bind(provider.id, legacyEnc, Date.UTC(2026, 10, 2))
+      .run();
+    await db
+      .prepare(
+        "INSERT INTO error_rules (id, provider_id, priority, status_codes, body_regex, action, cooldown_s, note, enabled) VALUES (902, NULL, 990, '', 'legacy-global-rule', 'UPSTREAM_ERROR', NULL, 'legacy global rule', 1)",
+      )
+      .run();
+
+    // Apply 0002 the way a deploy does, one statement at a time: strip `--` comments, then split on semicolons.
+    const statements = dropMigration
+      .replace(/--.*$/gm, '')
+      .split(';')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    for (const stmt of statements) await db.prepare(stmt).run();
   }, 60_000);
 
   afterAll(async () => {
@@ -108,8 +139,38 @@ describe('DROP-01 request-path guard (real local D1)', () => {
     return parseKey({ ...(await rowOf(id)), ...overrides });
   }
 
-  const invalidPatch = (reason: string): KeyStatePatch => patchForAction(provider, 'INVALID_KEY', reason, null, NOW)!;
-  const rateLimitedPatch = (): KeyStatePatch => patchForAction(provider, 'RATE_LIMITED', 'HTTP 429: slow down', 60, NOW)!;
+  const invalidPatch = (reason: string): KeyStatePatch => patchForAction(provider, 'INVALID_KEY', reason, null, 401, NOW)!;
+  const rateLimitedPatch = (): KeyStatePatch => patchForAction(provider, 'RATE_LIMITED', 'HTTP 429: slow down', 60, 429, NOW)!;
+
+  it('migration 0002 only adds two columns and keeps every existing row', async () => {
+    // Every statement in the file has the additive ADD COLUMN form and nothing else (T-03-07).
+    const statements = dropMigration
+      .replace(/--.*$/gm, '')
+      .split(';')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    expect(statements).toHaveLength(2);
+    for (const s of statements) expect(s).toMatch(/^ALTER TABLE \w+ ADD COLUMN /);
+
+    // The legacy rows seeded before 0002 are all still there, each with the new defaults.
+    const legacyInvalid = await rowOf(900);
+    expect(legacyInvalid).toMatchObject({ status: 'invalid', status_reason: 'HTTP 401: legacy bad key', status_code: null });
+    const legacyExhausted = await rowOf(901);
+    expect(legacyExhausted).toMatchObject({ status: 'exhausted', status_code: null });
+    // The legacy global rule seeded before 0002 is still there after it. The harness creates tables only, so the
+    // 0001 seed rows are not in D1 here; this row stands in for an existing rule.
+    const legacyRule = await db.prepare('SELECT * FROM error_rules WHERE id = 902').first<Row>();
+    expect(parseRule(legacyRule!)).toMatchObject({ action: 'UPSTREAM_ERROR', body_regex: 'legacy-global-rule', origin: 'rule' });
+  });
+
+  it('a 403 from the relay drops the key and stores status_code 403 in D1', async () => {
+    const id = await seedKey({ status: 'active' });
+    const key = await keyOf(id);
+    const patch = patchForAction(provider, 'INVALID_KEY', 'HTTP 403: forbidden', null, 403, NOW)!;
+    expect(patch.status_code).toBe(403);
+    await applyKeyPatch(env, key, patch, NOW);
+    expect(parseKey(await rowOf(id))).toMatchObject({ status: 'invalid', status_reason: 'HTTP 403: forbidden', status_code: 403, status_changed_at: NOW });
+  });
 
   it('an unforced write leaves an invalid or disabled row alone and a forced write changes it', async () => {
     const invalidId = await seedKey({ status: 'invalid', status_reason: 'HTTP 401: bad key', status_changed_at: T_FIRST });

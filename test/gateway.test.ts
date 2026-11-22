@@ -22,7 +22,8 @@ import { resolveRoute } from '../src/worker/routing/resolve-route';
 import { isUsable, orderKeys } from '../src/worker/routing/select-key';
 import type { Config, Env, ErrorRule, GatewayKey, Provider, ProviderKey, Route } from '../src/worker/types';
 
-const DEFAULT_RULES: ErrorRule[] = [
+/** The default global rules without `origin`; DEFAULT_RULES maps them so the origin is set in one place. */
+const BASE_DEFAULT_RULES: Omit<ErrorRule, 'origin'>[] = [
   {
     id: 1,
     provider_id: null,
@@ -64,6 +65,7 @@ const DEFAULT_RULES: ErrorRule[] = [
   { id: 8, provider_id: null, priority: 70, status_codes: '408,500-599', body_regex: null, action: 'UPSTREAM_ERROR', cooldown_s: null, note: '5xx', enabled: true },
   { id: 9, provider_id: null, priority: 80, status_codes: '400-499', body_regex: null, action: 'CLIENT_ERROR', cooldown_s: null, note: '4xx', enabled: true },
 ];
+const DEFAULT_RULES: ErrorRule[] = BASE_DEFAULT_RULES.map((r) => ({ ...r, origin: 'rule' as const }));
 
 function makeProvider(overrides: Partial<Provider> = {}): Provider {
   return {
@@ -102,6 +104,7 @@ function makeKey(overrides: Partial<ProviderKey> = {}): ProviderKey {
     priority: 0,
     status: 'active',
     status_reason: null,
+    status_code: null,
     status_changed_at: null,
     cooldown_until: null,
     next_recheck_at: null,
@@ -165,6 +168,7 @@ describe('Error Classifier', () => {
       cooldown_s: null,
       note: 'Custom relay 400 exhausted',
       enabled: true,
+      origin: 'rule',
     };
     const rules = [providerRule, ...DEFAULT_RULES];
     expect(classify(rules, 7, 400, '{"error":"custom_relay_empty_wallet"}').action).toBe('EXHAUSTED');
@@ -294,6 +298,7 @@ describe('Full Proxy Failover & Admin Integration', () => {
   let insertedLogs: unknown[][];
   let keyUpdates: Array<{ id: number; status: string; reason: string | null }>;
   let keyUpdateSql: string[];
+  let keyUpdateCodes: Array<number | null>;
   let providerInserts: unknown[][];
   let providerUpdates: unknown[][];
   let env: Env;
@@ -303,6 +308,7 @@ describe('Full Proxy Failover & Admin Integration', () => {
     insertedLogs = [];
     keyUpdates = [];
     keyUpdateSql = [];
+    keyUpdateCodes = [];
     providerInserts = [];
     providerUpdates = [];
 
@@ -401,7 +407,8 @@ describe('Full Proxy Failover & Admin Integration', () => {
           if (sql.includes('INSERT INTO request_logs')) {
             insertedLogs.push(bound);
           } else if (sql.includes('UPDATE provider_keys')) {
-            keyUpdates.push({ id: Number(bound[5]), status: String(bound[0]), reason: bound[1] as string | null });
+            keyUpdates.push({ id: Number(bound[6]), status: String(bound[0]), reason: bound[1] as string | null });
+            keyUpdateCodes.push(bound[2] as number | null);
             keyUpdateSql.push(sql);
           } else if (sql.startsWith('UPDATE providers SET')) {
             providerUpdates.push(bound);
@@ -473,6 +480,33 @@ describe('Full Proxy Failover & Admin Integration', () => {
       },
     };
   }
+
+  it('a 401 drops the key and records the status (DROP-04)', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+      const headers = new Headers(init?.headers);
+      if (headers.get('x-api-key') === 'sk-provA-key1') {
+        return new Response('{"error":{"message":"bad key"}}', { status: 401, headers: { 'content-type': 'application/json' } });
+      }
+      return new Response('{"id":"msg_1","content":[{"type":"text","text":"Hi"}],"usage":{"input_tokens":12,"output_tokens":4}}', {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+
+    const { ctx, flush } = makeCtx();
+    const req = new Request('https://gw.test/v1/messages', {
+      method: 'POST',
+      headers: { 'x-api-key': GW_TOKEN, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'claude-sonnet-4', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+
+    const res = await handleProxy(req, env, ctx);
+    await flush();
+
+    expect(res.status).toBe(200);
+    expect(keyUpdates).toEqual([{ id: 101, status: 'invalid', reason: 'bad key' }]);
+    expect(keyUpdateCodes).toEqual([401]);
+  });
 
   it('rotates from Key 1 (402 Exhausted) to Key 2 (200 OK) on the same provider', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {

@@ -47,7 +47,7 @@ export async function recheckKey(env: Env, config: Config, provider: Provider, k
     }
     detail += `; test: ${t.message}`;
     if (t.cls && t.cls.action !== 'EXHAUSTED') {
-      const patch = patchForAction(provider, t.cls.action, t.cls.reason, t.cls.cooldownS, now);
+      const patch = patchForAction(provider, t.cls.action, t.cls.reason, t.cls.cooldownS, t.status, now);
       if (patch) {
         await applyKeyPatch(env, key, patch);
         return { key_id: key.id, result: 'still_exhausted', detail };

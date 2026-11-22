@@ -275,7 +275,7 @@ export async function handleProxy(req: Request, env: Env, ctx: ExecutionContext)
         case 'EXHAUSTED':
         case 'INVALID_KEY':
         case 'RATE_LIMITED': {
-          const patch = patchForAction(provider, f.cls.action, f.cls.reason, f.cls.cooldownS);
+          const patch = patchForAction(provider, f.cls.action, f.cls.reason, f.cls.cooldownS, f.status);
           if (patch) ctx.waitUntil(applyKeyPatch(env, key, patch));
           continue; // next key of the same provider
         }

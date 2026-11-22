@@ -408,7 +408,7 @@ s.put('/keys/:id', async (c) => {
   // so it leaves an existing or concurrently recorded drop intact.
   if (b.status === 'active') await applyKeyPatch(c.env, key, ACTIVE_PATCH, Date.now(), true);
   else if (b.status === 'disabled') {
-    await applyKeyPatch(c.env, key, { status: 'disabled', status_reason: 'disabled manually', cooldown_until: null, next_recheck_at: null });
+    await applyKeyPatch(c.env, key, { status: 'disabled', status_reason: 'disabled manually', status_code: null, cooldown_until: null, next_recheck_at: null });
   } else if (b.status !== undefined) throw bad('status must be "active" or "disabled"');
   invalidateConfig();
   void provider;
@@ -442,7 +442,7 @@ s.post('/keys/:id/test', async (c) => {
   if (statusBefore !== 'invalid' && statusBefore !== 'disabled') {
     if (r.ok && statusBefore !== 'active') await applyKeyPatch(c.env, key, ACTIVE_PATCH);
     else if (!r.ok && r.cls) {
-      const patch = patchForAction(provider, r.cls.action, r.cls.reason, r.cls.cooldownS, Date.now());
+      const patch = patchForAction(provider, r.cls.action, r.cls.reason, r.cls.cooldownS, r.status, Date.now());
       if (patch) await applyKeyPatch(c.env, key, patch);
     }
   }
