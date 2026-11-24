@@ -14,6 +14,10 @@ import worker from '../src/worker/index';
 type Row = Record<string, unknown>;
 type TestProxy = Awaited<ReturnType<typeof getPlatformProxy<Env>>>;
 
+// wrangler's platform proxy takes ENCRYPTION_KEY only from the gitignored .dev.vars, which CI does not have. Each suite
+// sets this fixed secret instead, so the encrypted key rows and the admin routes agree on it on any machine.
+const TEST_ENCRYPTION_KEY = 'key-drop-test-enc-secret';
+
 // The classify cases use these rules rather than the 0001 seed rows, which this harness does not insert. They copy
 // the default invalid-token rule (body regex, any status) and the global 401 rule, so the rules match production.
 const DROP_RULES: ErrorRule[] = [
@@ -59,7 +63,7 @@ describe('DROP-01 request-path guard (real local D1)', () => {
 
   beforeAll(async () => {
     proxy = await getPlatformProxy<Env>({ persist: false });
-    env = proxy.env;
+    env = { ...proxy.env, ENCRYPTION_KEY: TEST_ENCRYPTION_KEY };
     db = env.DB;
     const ddls = migration.match(/CREATE TABLE [\s\S]*?\n\);/g) ?? [];
     if (ddls.length === 0) throw new Error('CREATE TABLE statements not found in migrations/0001_init.sql');
@@ -76,7 +80,7 @@ describe('DROP-01 request-path guard (real local D1)', () => {
 
     // Legacy rows, written before migration 0002 with plain INSERTs that name only 0001 columns. The migration
     // must leave every one of them intact (DROP-04 empty edge: a key dropped before this phase reads status_code null).
-    const legacyEnc = await encrypt('sk-legacy-key', env.ENCRYPTION_KEY);
+    const legacyEnc = await encrypt('sk-legacy-key', TEST_ENCRYPTION_KEY);
     await db
       .prepare(
         "INSERT INTO provider_keys (id, provider_id, alias, key_enc, key_hint, status, status_reason, status_changed_at) VALUES (900, ?, 'legacy-invalid', ?, 'sk-leg...0000', 'invalid', 'HTTP 401: legacy bad key', ?)",
@@ -136,7 +140,7 @@ describe('DROP-01 request-path guard (real local D1)', () => {
       balance_checked_at: null,
       ...seed,
     };
-    const enc_ = await encrypt('sk-synthetic-key', env.ENCRYPTION_KEY);
+    const enc_ = await encrypt('sk-synthetic-key', TEST_ENCRYPTION_KEY);
     const res = await db
       .prepare(
         'INSERT INTO provider_keys (provider_id, alias, key_enc, key_hint, status, status_reason, status_changed_at, cooldown_until, next_recheck_at, balance, balance_checked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
@@ -786,7 +790,7 @@ describe('drop list classification (real local D1)', () => {
   });
 
   async function seedKeyFor(p: Provider): Promise<number> {
-    const enc_ = await encrypt('sk-drop-list-key', proxy.env.ENCRYPTION_KEY);
+    const enc_ = await encrypt('sk-drop-list-key', TEST_ENCRYPTION_KEY);
     const res = await db
       .prepare("INSERT INTO provider_keys (provider_id, alias, key_enc, key_hint, status) VALUES (?, ?, ?, 'sk-dro...0000', 'active')")
       .bind(p.id, `dl-${Math.random().toString(36).slice(2)}`, enc_)
@@ -821,7 +825,7 @@ describe('drop list classification (real local D1)', () => {
     const id = await seedKeyFor(dropProvider);
     const cls = classify(cfg.rules, dropProvider.id, 418, 'teapot', null);
     const patch = patchForAction(dropProvider, cls.action, cls.reason, cls.cooldownS, 418, NOW)!;
-    await applyKeyPatch(proxy.env, await keyOf(id), patch, NOW);
+    await applyKeyPatch({ ...proxy.env, ENCRYPTION_KEY: TEST_ENCRYPTION_KEY }, await keyOf(id), patch, NOW);
     expect(parseKey(await keyRow(id))).toMatchObject({ status: 'invalid', status_code: 418 });
   });
 
@@ -941,7 +945,12 @@ describe('provider create is atomic with its drop rule (real local D1)', () => {
   }
 
   it('a drop-rule insert failure rolls back provider creation (D-04)', async () => {
-    const adminEnv = { ...proxy.env, ADMIN_PASSWORD: 'pw-create-rollback', SESSION_SECRET: 'sess-create-rollback' };
+    const adminEnv = {
+      ...proxy.env,
+      ENCRYPTION_KEY: TEST_ENCRYPTION_KEY,
+      ADMIN_PASSWORD: 'pw-create-rollback',
+      SESSION_SECRET: 'sess-create-rollback',
+    };
     const cookie = await cookieFor(adminEnv);
     const name = 'Rollback Relay';
     const beforeVersion = await count("SELECT CAST(value AS INTEGER) AS n FROM settings WHERE key = 'config_version'");
@@ -963,6 +972,8 @@ describe('provider create is atomic with its drop rule (real local D1)', () => {
         ctx,
       );
       expect(failed.status).toBe(500);
+      // The 500 must come from the rule INSERT the trigger aborts, not from the admin guard's missing-secret 500.
+      expect(await failed.text()).toContain('drop rule refused');
       expect(await count('SELECT COUNT(*) AS n FROM providers WHERE name = ?', name)).toBe(0);
       expect(await count('SELECT COUNT(*) AS n FROM provider_keys')).toBe(0);
       expect(await count('SELECT COUNT(*) AS n FROM route_providers')).toBe(0);
