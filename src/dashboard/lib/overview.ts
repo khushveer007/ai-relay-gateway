@@ -1,26 +1,6 @@
 // Pure Overview helpers. DOM-free; relative imports only (Vitest has no alias, and the Worker
 // tsconfig that type-checks test/ has no DOM lib).
 import { fmtAgo, fmtDateTime, plainActionText } from './format';
-import type { ModelPriceResolutionDTO, ProviderDTO, ProviderKeyDTO } from './api';
-import { compareModelNames } from '../../shared/pricing';
-
-type AttentionProvider = {
-  name: ProviderDTO['name'];
-  keys: Pick<ProviderKeyDTO, 'id' | 'alias' | 'key_hint' | 'status'>[];
-};
-
-export function droppedKeyNames(providers: AttentionProvider[]): string[] {
-  return providers.flatMap((provider) => provider.keys
-    .filter((key) => key.status === 'invalid')
-    .map((key) => ({ provider: provider.name, key: key.alias || key.key_hint, id: key.id })))
-    .sort((a, b) => compareModelNames(a.provider, b.provider) || compareModelNames(a.key, b.key) || a.id - b.id)
-    .map(({ provider, key }) => `${provider} / ${key}`);
-}
-
-export function unpricedModelNames(models: Pick<ModelPriceResolutionDTO, 'upstream_model' | 'priced_model'>[]): string[] {
-  return [...new Set(models.filter((model) => model.priced_model === null).map((model) => model.upstream_model))]
-    .sort(compareModelNames);
-}
 
 export const RANGES = ['1h', '24h', '7d'] as const;
 export type Range = (typeof RANGES)[number];

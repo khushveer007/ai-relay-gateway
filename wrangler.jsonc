@@ -26,16 +26,6 @@
     }
   ],
 
-  "previews": {
-    "d1_databases": [
-      {
-        "binding": "DB",
-        "database_name": "ai-gateway-preview",
-        "database_id": "3513f105-680f-4094-9ae4-b7f7ff2777e9"
-      }
-    ]
-  },
-
   // */15 → re-check exhausted keys, refresh balances, clear cooldowns
   // 0 3 * * * → delete request logs older than the retention period
   "triggers": {

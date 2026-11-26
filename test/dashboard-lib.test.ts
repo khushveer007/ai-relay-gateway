@@ -9,7 +9,6 @@ import {
   fmtDateTime,
   fmtMs,
   fmtNum,
-  fmtRequestCost,
   fmtTime,
   fmtTokens,
   fmtTokensOrDash,
@@ -23,13 +22,11 @@ import {
   RANGE_LABEL,
   RANGE_STORAGE_KEY,
   alignSeries,
-  droppedKeyNames,
   fillSeries,
   keyDetailText,
   keyLabel,
   parseRange,
   successRate,
-  unpricedModelNames,
 } from '../src/dashboard/lib/overview';
 import {
   DESKTOP_MIN_WIDTH_PX,
@@ -40,39 +37,6 @@ import {
   shouldReloadForPreloadError,
 } from '../src/dashboard/lib/guards';
 import { NAV_LABEL, VIEW_IDS, parseHash } from '../src/dashboard/lib/routes';
-
-it('formats frozen request cost, zero, and all missing-cost states', () => {
-  expect(fmtRequestCost(1)).toBe('$0.000000001');
-  expect(fmtRequestCost(120_580_650)).toBe('$0.12058065');
-  expect(fmtRequestCost(999_999_999)).toBe('$0.999999999');
-  expect(fmtRequestCost(1_000_000_001)).toBe('$1.000000001');
-  expect(fmtRequestCost(1_199_999_999)).toBe('$1.199999999');
-  expect(fmtRequestCost(1_200_000_000)).toBe('$1.20');
-  expect(fmtRequestCost(Number.MAX_SAFE_INTEGER)).toBe('$9007199.254740991');
-  expect(fmtRequestCost(0)).toBe('$0.00');
-  expect(fmtRequestCost(null, 'unpriced')).toBe('Unpriced');
-  expect(fmtRequestCost(null, 'no_usage')).toBe('No usage reported');
-  expect(fmtRequestCost(null, null)).toBe('Cost unavailable');
-  expect(fmtRequestCost(undefined)).toBe('Cost unavailable');
-});
-
-it('counts and orders complete attention inventories before taking three names', () => {
-  expect(droppedKeyNames([])).toEqual([]);
-  const key = (id: number, alias: string, status: 'invalid' | 'disabled' | 'exhausted' = 'invalid') => ({ id, alias, key_hint: 'hint', status });
-  expect(droppedKeyNames([{ name: 'Only', keys: [key(9, '')] }])).toEqual(['Only / hint']);
-  expect(droppedKeyNames([
-    { name: 'Zebra', keys: [key(2, 'z'), key(5, 'disabled', 'disabled')] },
-    { name: 'Alpha', keys: [key(4, 'same'), key(1, 'same'), key(3, ''), key(6, 'exhausted', 'exhausted')] },
-  ])).toEqual(['Alpha / hint', 'Alpha / same', 'Alpha / same', 'Zebra / z']);
-  const model = (upstream_model: string, priced_model: string | null = null) => ({ upstream_model, priced_model });
-  expect(unpricedModelNames([])).toEqual([]);
-  expect(unpricedModelNames([model('only')])).toEqual(['only']);
-  expect(unpricedModelNames([model('c'), model('b'), model('a'), model('b')])).toEqual(['a', 'b', 'c']);
-  const laterPage = Array.from({ length: 51 }, (_, i) => model(`model-${String(i).padStart(2, '0')}`));
-  expect(unpricedModelNames([model('zero', 'zero'), ...[...laterPage].reverse(), model('model-00')])).toEqual(
-    laterPage.map((entry) => entry.upstream_model),
-  );
-});
 
 const NOW = Date.UTC(2026, 10, 14, 12, 0, 0);
 
@@ -324,8 +288,8 @@ describe('guards', () => {
 });
 
 describe('routes', () => {
-  it('VIEW_IDS holds the seven destinations in nav order', () => {
-    expect([...VIEW_IDS]).toEqual(['overview', 'providers', 'routes', 'gateway-keys', 'logs', 'prices', 'settings']);
+  it('VIEW_IDS holds the six destinations in nav order', () => {
+    expect([...VIEW_IDS]).toEqual(['overview', 'providers', 'routes', 'gateway-keys', 'logs', 'settings']);
   });
 
   it('NAV_LABEL maps every id to its exact label', () => {
@@ -335,7 +299,6 @@ describe('routes', () => {
       routes: 'Routes & Chains',
       'gateway-keys': 'Gateway Keys',
       logs: 'Request Logs',
-      prices: 'Prices',
       settings: 'Rules & Settings',
     });
   });

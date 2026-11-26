@@ -39,19 +39,22 @@ Requests from Claude Code and Codex keep working through key rotation and provid
 - ✓ The add/edit provider dialog shows only the basics up front: name, base URL, and API keys — Phase 2
 - ✓ Everything else (formats, key strategy, timeout, model map, allowlist, balance mode/path/field/divisor, recheck mode/interval, test model, extra headers, parse usage) sits in a collapsed "Advanced" section with sensible defaults — Phase 2
 - ✓ A provider can be created by filling only the basic fields — Phase 2
-- ✓ Error-rule actions are shown in plain language, e.g. "Drop key until I re-enable it", "Pause key for N min", "Mark out of balance (auto-recheck)", "Try next provider", "Return error to client", instead of raw `EXHAUSTED` / `INVALID_KEY` codes — Phase 3
-- ✓ The provider dialog has a per-provider drop list: "Drop key on status codes: 403, 418", with an optional "only if message contains" text — Phase 3
-- ✓ A dropped key is never retried by requests or by cron until the operator re-enables it — Phase 3
-- ✓ A dropped key shows the status code, error message, and time it was dropped, with a "Re-enable" button — Phase 3
-- ✓ The price table supports input, output, cache-read, and cache-write rates per million tokens. The operator can import the public catalog on demand and override individual rates — Phase 4
-- ✓ Relay model names resolve through catalog matches or operator-pinned aliases. Unmatched models appear in Prices and Overview — Phase 4
-- ✓ Request Logs shows the stored list-price cost or explains why cost is unavailable. Later price edits preserve stored cost, and the daily rollup preserves totals beyond raw log retention — Phase 4
 
 ### Active
 
+**Clear key-drop rules**
+- [ ] Error-rule actions are shown in plain language, e.g. "Drop key until I re-enable it", "Pause key for N min", "Mark out of balance (auto-recheck)", "Try next provider", "Return error to client", instead of raw `EXHAUSTED` / `INVALID_KEY` codes
+- [ ] The provider dialog has a per-provider drop list: "Drop key on status codes: 403, 418", with an optional "only if message contains" text
+- [ ] A dropped key is never retried by requests or by cron until the operator re-enables it
+- [ ] A dropped key shows the status code, error message, and time it was dropped, with a "Re-enable" button
+
 **Per-model pricing and cost monitoring**
-- [ ] Refresh catalog prices daily for models seen in logs and let the operator backfill retained requests with missing cost
-- [ ] Dashboard shows cost totals for today, 7 days, and 30 days, with a trend chart and breakdowns by model, provider, and gateway key
+- [ ] Every model has input, output, cache-read, and cache-write prices per million tokens
+- [ ] Prices auto-fill from a public price dataset (e.g. LiteLLM or OpenRouter), and the operator can override any model by hand
+- [ ] Relay model names that don't match exactly resolve through fuzzy/family matching (e.g. `claude-sonnet-4-5-20250929-thinking` → `claude-sonnet-4-5`); models still unmatched are listed as unpriced
+- [ ] Cost uses official list prices
+- [ ] Each request log stores its cost at the time it ran, so later price edits don't change past totals
+- [ ] Dashboard shows cost: totals for today / 7 days / 30 days with a trend chart, a breakdown by model and by provider, a breakdown per gateway key, and per-request cost in the logs
 
 ### Out of Scope
 
@@ -66,9 +69,9 @@ Requests from Claude Code and Codex keep working through key rotation and provid
 ## Context
 
 - **Existing system:** Brownfield. Full codebase map lives in `.planning/codebase/` (ARCHITECTURE, STACK, STRUCTURE, CONVENTIONS, INTEGRATIONS, TESTING, CONCERNS), mapped at commit `714edac`.
-- **Current dashboard:** React and shadcn/ui in `src/dashboard/`, built with Vite and served as Workers Static Assets. The responsive provider dialog exposes the basics first, with Advanced and Drop keys sections.
-- **Key-drop behavior:** The gateway reuses the `invalid` state for dropped keys and stores the first drop's status code, message, and time. A provider's drop list takes precedence over global rules. Test reports the result while the key stays dropped. Re-enable returns it to rotation.
-- **Usage and cost capture:** `src/worker/proxy/usage.ts` extracts input, output, cache-read, and cache-write tokens. The serving attempt fixes the price using its upstream model and configuration snapshot. `request_logs` stores cost and price provenance, and the daily rollup preserves totals after raw log cleanup.
+- **Current dashboard:** Vanilla TypeScript SPA in `src/dashboard/` (about 2,700 lines of TS across `main.ts`, `api.ts`, and six views, plus about 970 lines of hand-written dark glassmorphic CSS). The provider dialog in `src/dashboard/views/providers.ts` has about 18 fields with no grouping. The typed admin API client in `api.ts` can be carried over.
+- **Existing drop behavior:** The engine already supports a "stays off" state. `INVALID_KEY` sets `status = 'invalid'` with no `next_recheck_at`, and cron only rechecks `exhausted` keys. Default global rules map 401 and invalid-token messages to `INVALID_KEY`, 402 and balance messages to `EXHAUSTED` (auto-recheck), and 403 to a 10-minute `RATE_LIMITED` cooldown. The operator's problem is that the rules UI doesn't make this clear or quick to set up, so the work is mostly UX plus a per-provider drop list on top of the existing `error_rules` table.
+- **Usage data available for pricing:** `src/worker/proxy/usage.ts` extracts `input_tokens`, `output_tokens`, and cache read tokens (`cache_read_input_tokens` / `cached_tokens`). It does not capture Anthropic `cache_creation_input_tokens` today, so cache-write pricing needs that extraction added. `request_logs` has `model` and `upstream_model`; pricing should key off the upstream model the provider actually served.
 - **Primary clients:** Claude Code and OpenAI Codex CLI, often through `new-api` / `one-api` relays whose model names carry suffixes and dates.
 - **Operator:** One person running their own gateway, wanting full management from a phone as well as desktop.
 
@@ -90,12 +93,12 @@ Requests from Claude Code and Codex keep working through key rotation and provid
 | Rebuild dashboard on React + shadcn/ui | Mature, accessible components (Radix), responsive patterns, largest ecosystem; components live in the repo | — Pending |
 | Revamp first, then build features on the new UI | Avoids building the provider dialog, rules UI, and cost views twice | — Pending |
 | Provider dialog = basics + collapsed Advanced | Smallest change that removes the wall of 18 fields | — Pending |
-| Reuse `error_rules` and the `invalid` state for key drop | Keep dropped keys out of rotation until the operator re-enables them | Phase 3 verified the D1 and in-memory guards and report-only Test |
-| Per-provider drop list (status codes + optional message match) | Common case shouldn't need the global rules page | Phase 3 verified provider-level editing and precedence over global rules |
-| Cost = official list price | Simple, comparable across providers | Phase 4 verified frozen list-price cost across the supported formats |
-| Prices filled from a public dataset with manual override | The catalog supplies baseline rates and overrides handle gaps | Phase 4 verified on-demand LiteLLM import and field overrides. Daily refresh is in Phase 5 |
-| Match relay model names and allow exact alias pins | Relay names can carry dates and suffixes or require an operator choice | Phase 4 verified catalog matches, pins, and unpriced models |
-| Freeze cost per request at log time | Preserve historical totals through later price edits | Phase 4 verified price and alias edits preserve the original request cost and provenance |
+| Key-drop work is mainly UX over existing `error_rules` + `invalid` state | Engine already keeps `invalid` keys off until manual re-enable; the gap is clarity and quick setup | — Pending |
+| Per-provider drop list (status codes + optional message match) | Common case shouldn't need the global rules page | — Pending |
+| Cost = official list price | Simple, comparable across providers | — Pending |
+| Prices auto-filled from a public dataset with manual override | Covers hundreds of models without hand entry; overrides handle gaps | — Pending |
+| Fuzzy/family matching for relay model names before marking unpriced | Relay names carry dates and suffixes that never match exactly | — Pending |
+| Freeze cost per request at log time | Editing a price later must not rewrite history | — Pending |
 | Full mobile parity (all management tasks) | Operator wants to manage everything from a phone | — Pending |
 
 ## Evolution
@@ -116,4 +119,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-11-26 after Phase 4*
+*Last updated: 2026-11-16 after Phase 2*

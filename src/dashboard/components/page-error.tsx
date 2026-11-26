@@ -7,19 +7,18 @@ interface PageErrorProps {
   onRefresh: () => void;
   /** A refetch is running: the Refresh button is disabled. */
   refreshing: boolean;
-  retryName?: string;
 }
 
 /**
  * The shared load-failure panel: shown when a page's query fails with no cached data to show. It
  * never shows cached numbers as current (UI-SPEC error contract).
  */
-export function PageError({ message, onRefresh, refreshing, retryName }: PageErrorProps) {
+export function PageError({ message, onRefresh, refreshing }: PageErrorProps) {
   return (
     <Card role="alert">
       <CardContent className="flex flex-wrap items-center justify-between gap-3">
         <span className="min-w-0 text-sm break-words">{message}</span>
-        <Button variant="outline" size="sm" className="h-11 md:h-8" onClick={onRefresh} disabled={refreshing} aria-label={retryName}>
+        <Button variant="outline" size="sm" className="h-11 md:h-8" onClick={onRefresh} disabled={refreshing}>
           Refresh
         </Button>
       </CardContent>

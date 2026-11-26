@@ -1,11 +1,10 @@
-import { priceUsage, type PriceIndex, type PriceResolution } from '../../shared/pricing';
-import type { Attempt, Env, Format } from '../types';
+import type { Attempt, Env } from '../types';
 
 export interface LogEntry {
   ts: number;
   gateway_key_id: number | null;
   route_id: number | null;
-  format: Format;
+  format: string;
   path: string;
   model: string | null;
   upstream_model: string | null;
@@ -18,12 +17,11 @@ export interface LogEntry {
   input_tokens: number | null;
   output_tokens: number | null;
   cache_tokens: number | null;
-  cache_write_tokens: number | null;
   attempts: Attempt[];
   error: string | null;
 }
 
-export function newLog(path: string, format: Format): LogEntry {
+export function newLog(path: string, format: string): LogEntry {
   return {
     ts: Date.now(),
     gateway_key_id: null,
@@ -41,29 +39,20 @@ export function newLog(path: string, format: Format): LogEntry {
     input_tokens: null,
     output_tokens: null,
     cache_tokens: null,
-    cache_write_tokens: null,
     attempts: [],
     error: null,
   };
 }
 
 /** One INSERT per request: the only D1 write on the happy path. */
-export function writeLog(env: Env, e: LogEntry, prices: PriceIndex | null = null, resolution: PriceResolution | null = null, hasFinalUsage = true): Promise<unknown> {
+export function writeLog(env: Env, e: LogEntry): Promise<unknown> {
   if (!env?.DB) return Promise.resolve();
   const failovers = Math.max(0, e.attempts.length - 1);
-  const priced = priceUsage(prices, resolution, e.format, {
-    input: hasFinalUsage ? e.input_tokens : null,
-    output: hasFinalUsage ? e.output_tokens : null,
-    cache: hasFinalUsage ? e.cache_tokens : null,
-    cacheWrite: hasFinalUsage ? e.cache_write_tokens : null,
-  });
   return env.DB.prepare(
     `INSERT INTO request_logs
        (ts, gateway_key_id, route_id, format, path, model, upstream_model, provider_id, key_id, status, stream,
-        latency_ms, ttfb_ms, input_tokens, output_tokens, cache_tokens, failovers, attempts, error,
-        cache_write_tokens, cost_nano_usd, cost_reason, priced_model, price_match_type, price_tier_threshold_tokens,
-        cache_read_savings_nano_usd)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        latency_ms, ttfb_ms, input_tokens, output_tokens, cache_tokens, failovers, attempts, error)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
     .bind(
       e.ts,
@@ -85,13 +74,6 @@ export function writeLog(env: Env, e: LogEntry, prices: PriceIndex | null = null
       failovers,
       JSON.stringify(e.attempts),
       e.error ? e.error.slice(0, 500) : null,
-      e.cache_write_tokens,
-      priced.cost_nano_usd,
-      priced.cost_reason,
-      priced.priced_model,
-      priced.price_match_type,
-      priced.price_tier_threshold_tokens,
-      priced.cache_read_savings_nano_usd,
     )
     .run()
     .catch((err) => console.error('log write failed', err));

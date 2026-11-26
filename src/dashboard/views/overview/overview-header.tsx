@@ -48,7 +48,7 @@ export function OverviewHeader({ range, onRangeChange, onRefresh, isFetching, up
             </button>
           ))}
         </div>
-        <Button variant="outline" size="sm" onClick={onRefresh} disabled={isFetching} aria-label="Refresh overview">
+        <Button variant="outline" size="sm" onClick={onRefresh} disabled={isFetching}>
           <RefreshCw aria-hidden="true" className={cn(isFetching && 'animate-spin')} />
           Refresh
         </Button>

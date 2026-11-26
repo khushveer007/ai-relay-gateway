@@ -6,7 +6,6 @@ import { mapModel, supportsModel } from '../routing/model-map';
 import { resolveRoute } from '../routing/resolve-route';
 import { isUsable, orderKeys } from '../routing/select-key';
 import type { Attempt, Config, Env, Format, GatewayKey, Provider } from '../types';
-import { resolvePrice, type PriceIndex, type PriceResolution } from '../../shared/pricing';
 import {
   buildClientHeaders,
   buildUpstreamHeaders,
@@ -219,8 +218,7 @@ export async function handleProxy(req: Request, env: Env, ctx: ExecutionContext)
             failure = { status: 200, text: peek.headText, headers: res.headers, cls: classify(config.rules, provider.id, 200, peek.headText) };
           } else {
             log.ttfb_ms = Date.now() - started;
-            const resolution = resolvePrice(config.prices, upstreamModel);
-            success = streamToClient(peek, res, provider, attempt, log, env, ctx, started, config.prices, resolution);
+            success = streamToClient(peek, res, provider, attempt, log, env, ctx, started);
           }
         } else {
           clearTimeout(timer);
@@ -229,12 +227,15 @@ export async function handleProxy(req: Request, env: Env, ctx: ExecutionContext)
             failure = { status: 200, text, headers: res.headers, cls: classify(config.rules, provider.id, 200, text) };
           } else {
             if (provider.parse_usage) {
-              const tap = new UsageTap(format);
-              tap.readBody(text);
+              const tap = new UsageTap();
+              tap.feedText(text);
               applyUsage(log, tap.usage);
             }
             log.ttfb_ms = Date.now() - started;
             success = new Response(text, { status: res.status, headers: gatewayHeaders(res.headers, provider, attempts) });
+            log.status = res.status;
+            log.latency_ms = Date.now() - started;
+            ctx.waitUntil(writeLog(env, log));
           }
         }
       } catch (e) {
@@ -249,13 +250,6 @@ export async function handleProxy(req: Request, env: Env, ctx: ExecutionContext)
         log.provider_id = provider.id;
         log.key_id = key.id;
         log.upstream_model = upstreamModel;
-        if (!log.stream) {
-          log.status = success.status;
-          log.latency_ms = Date.now() - started;
-          const prices = config.prices;
-          const resolution = resolvePrice(prices, upstreamModel);
-          ctx.waitUntil(Promise.resolve().then(() => writeLog(env, log, prices, resolution)));
-        }
         if (key.status !== 'active') {
           ctx.waitUntil(applyKeyPatch(env, key, ACTIVE_PATCH).catch((error) => console.error('key state write failed', error)));
         }
@@ -327,7 +321,6 @@ function applyUsage(log: LogEntry, u: Usage | null): void {
   log.input_tokens = u.input;
   log.output_tokens = u.output;
   log.cache_tokens = u.cache;
-  log.cache_write_tokens = u.cacheWrite;
 }
 
 /**
@@ -343,17 +336,15 @@ function streamToClient(
   env: Env,
   ctx: ExecutionContext,
   started: number,
-  prices: PriceIndex,
-  resolution: PriceResolution,
 ): Response {
-  const tap = provider.parse_usage ? new UsageTap(log.format) : null;
+  const tap = provider.parse_usage ? new UsageTap() : null;
   const reader = peek.reader;
   log.stream = true;
   log.status = res.status;
 
   let resolveDone!: () => void;
   const done = new Promise<void>((r) => (resolveDone = r));
-  ctx.waitUntil(done.then(() => writeLog(env, log, prices, resolution, tap?.hasFinalUsage === true)));
+  ctx.waitUntil(done.then(() => writeLog(env, log)));
 
   let finished = false;
   const finish = (error?: string) => {
@@ -372,14 +363,14 @@ function streamToClient(
   });
 
   if (peek.done) {
-    tap?.feed(peek.head);
+    tap?.seedHead(peek.head, peek.headText);
     finish();
     return new Response(peek.head as unknown as BodyInit, { status: res.status, headers });
   }
 
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
-      tap?.feed(peek.head);
+      tap?.seedHead(peek.head, peek.headText);
       if (peek.head.length > 0) controller.enqueue(peek.head);
     },
     async pull(controller) {

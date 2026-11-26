@@ -1,12 +1,4 @@
-import type { MatchType } from '../../shared/pricing';
-
-export const MATCH_LABEL: Record<MatchType, string> = {
-  pinned: 'Pinned alias',
-  exact: 'Exact match',
-  normalized: 'Normalized match',
-  ambiguous: 'Ambiguous match',
-  none: 'No match',
-};
+// Pure formatting helpers. DOM-free and import-free so Vitest and the Worker tsconfig can load them.
 
 export function fmtNum(n: number | null | undefined): string {
   if (n === null || n === undefined || !Number.isFinite(n)) return '0';
@@ -29,19 +21,6 @@ export function fmtTokensOrDash(n: number | null | undefined): string {
 export function fmtBalance(b: number | null | undefined): string {
   if (b === null || b === undefined || !Number.isFinite(b)) return '—';
   return `$${b.toFixed(b < 1 && b > 0 ? 4 : 2)}`;
-}
-
-export function fmtRequestCost(cost: number | null | undefined, reason?: 'unpriced' | 'no_usage' | null): string {
-  if (cost == null) {
-    if (reason === 'unpriced') return 'Unpriced';
-    if (reason === 'no_usage') return 'No usage reported';
-    return 'Cost unavailable';
-  }
-  const scale = 1_000_000_000;
-  const nanos = cost % scale;
-  const dollars = (cost - nanos) / scale;
-  const fraction = String(nanos).padStart(9, '0').replace(/0+$/, '').padEnd(2, '0');
-  return `$${dollars}.${fraction}`;
 }
 
 export function fmtAgo(ts: number | null | undefined): string {

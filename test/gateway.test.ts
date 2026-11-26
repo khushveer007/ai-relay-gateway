@@ -261,47 +261,14 @@ describe('SSE Stream Peek & Token Usage Tap', () => {
   });
 
   it('extracts token usage across Anthropic, OpenAI Chat, and OpenAI Responses formats', () => {
-    const tap1 = new UsageTap('anthropic');
-    tap1.feed(new TextEncoder().encode('event: message_start\ndata: {"message":{"usage":{"input_tokens":420,"cache_read_input_tokens":100}}}\n\n'));
-    tap1.feed(new TextEncoder().encode('event: message_delta\ndata: {"usage":{"output_tokens":85}}\n\n'));
-    expect(tap1.usage).toEqual({ input: 420, output: 85, cache: 100, cacheWrite: null });
+    const tap1 = new UsageTap();
+    tap1.feedText('event: message_start\ndata: {"message":{"usage":{"input_tokens":420,"cache_read_input_tokens":100}}}\n\n');
+    tap1.feedText('event: message_delta\ndata: {"usage":{"output_tokens":85}}\n\n');
+    expect(tap1.usage).toEqual({ input: 420, output: 85, cache: 100 });
 
-    const tap2 = new UsageTap('openai-chat');
-    tap2.feed(new TextEncoder().encode('data: {"choices":[],"usage":{"prompt_tokens":50,"completion_tokens":25,"prompt_tokens_details":{"cached_tokens":10}}}\n\n'));
-    expect(tap2.usage).toEqual({ input: 50, output: 25, cache: 10, cacheWrite: null });
-    expect(tap2.hasFinalUsage).toBe(true);
-
-    const tap3 = new UsageTap('openai-responses');
-    const encoder = new TextEncoder();
-    tap3.feed(encoder.encode('data: {"type":"response.in_progress","response":{"usage":{"input_tokens":1,"output_tokens":1}}}\n\n'));
-    expect(tap3.hasFinalUsage).toBe(false);
-    expect(tap3.usage.input).toBeNull();
-    for (const byte of encoder.encode('event: response.completed\r\ndata: {"response":{"usage":{"input_tokens":50,"output_tokens":25,"input_tokens_details":{"cached_tokens":10,"cache_write_tokens":8}}}}\r\n\r\n')) {
-      tap3.feed(Uint8Array.of(byte));
-    }
-    expect(tap3.usage).toEqual({ input: 50, output: 25, cache: 10, cacheWrite: 8 });
-    expect(tap3.hasFinalUsage).toBe(true);
-  });
-
-  it('only records complete safe counts at every cache-write chunk boundary', () => {
-    const encoder = new TextEncoder();
-    for (const name of ['cache_creation_input_tokens', 'cached_creation_tokens', 'cache_write_tokens']) {
-      const wire = 'event: message_delta\ndata: {"usage":{"' + name + '":7345}}\n\n';
-      for (let split = 0; split <= wire.length; split++) {
-        const tap = new UsageTap('anthropic');
-        tap.feed(encoder.encode(wire.slice(0, split)));
-        tap.feed(encoder.encode(wire.slice(split)));
-        expect(tap.usage.cacheWrite, name + ' split ' + split).toBe(7345);
-      }
-    }
-    for (const raw of ['01', '1.3', '1e3', '-10', '2abc', '"7"', '9007199254740992', '9223372036854775807']) {
-      const tap = new UsageTap('anthropic');
-      tap.readBody('{"usage":{"cache_creation_input_tokens":' + raw + ',"input_tokens":0}}');
-      expect(tap.usage.cacheWrite).toBeNull();
-    }
-    const tap = new UsageTap('anthropic');
-    tap.readBody('{"usage":{"input_tokens":9007199254740991,"cache_creation_input_tokens":73}}');
-    expect(tap.usage).toEqual({ input: Number.MAX_SAFE_INTEGER, output: null, cache: null, cacheWrite: 73 });
+    const tap2 = new UsageTap();
+    tap2.feedText('data: {"choices":[],"usage":{"prompt_tokens":50,"completion_tokens":25,"prompt_tokens_details":{"cached_tokens":10}}}\n\n');
+    expect(tap2.usage).toEqual({ input: 50, output: 25, cache: 10 });
   });
 
   it('rewrites model in request JSON without full parse', () => {
@@ -1060,7 +1027,7 @@ describe('Full Proxy Failover & Admin Integration', () => {
       }) as any;
 
       env.DB.batch = (async (stmts: any[]) => {
-        if (stmts.length === 9) batchLoads++;
+        if (stmts.length === 7) batchLoads++;
         return origBatch(stmts);
       }) as any;
 

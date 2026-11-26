@@ -1,9 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { getPlatformProxy, unstable_splitSqlQuery } from 'wrangler';
+import { getPlatformProxy } from 'wrangler';
 import migration from '../migrations/0001_init.sql?raw';
 import dropMigration from '../migrations/0002_key_drop.sql?raw';
-import costMigration from '../migrations/0003_cost_capture.sql?raw';
-import { buildPriceIndex, compareModelNames, quantizeRate, resolvePrice, type PriceRecord } from '../src/shared/pricing';
 import { encrypt } from '../src/worker/db/crypto';
 import { getConfig, invalidateConfig } from '../src/worker/db/cache';
 import { keyStateStmt, loadConfig, parseKey, parseProvider, parseRule, type KeyStatePatch } from '../src/worker/db/repo';
@@ -19,10 +17,6 @@ type TestProxy = Awaited<ReturnType<typeof getPlatformProxy<Env>>>;
 // wrangler's platform proxy takes ENCRYPTION_KEY only from the gitignored .dev.vars, which CI does not have. Each suite
 // sets this fixed secret instead, so the encrypted key rows and the admin routes agree on it on any machine.
 const TEST_ENCRYPTION_KEY = 'key-drop-test-enc-secret';
-
-async function applyCostMigration(db: D1Database) {
-  await db.batch(unstable_splitSqlQuery(costMigration).map((statement) => db.prepare(statement)));
-}
 
 // The classify cases use these rules rather than the 0001 seed rows, which this harness does not insert. They copy
 // the default invalid-token rule (body regex, any status) and the global 401 rule, so the rules match production.
@@ -57,55 +51,6 @@ const DROP_RULES: ErrorRule[] = [
 const NOW = Date.UTC(2026, 10, 22, 9, 0, 0);
 const T_FIRST = NOW - 60_000;
 const T_SECOND = NOW;
-
-it('resolves exact combinations before a suffix-preserving family match', () => {
-  const record = (model: string): PriceRecord => ({
-    model, catalog_imported: true, catalog_base: { input: 1 }, override_base: {},
-    catalog_tier: { state: 'base', threshold_tokens: null, rates: {} }, override_tier: {},
-  });
-  const index = buildPriceIndex([
-    'claude-sonnet-4-5', 'claude-sonnet-4-5-20250929', 'gpt-5', 'gpt-5-pro',
-    'azure/gpt-5-mini-20250101', 'openai/gpt-5-mini-20250102', 'gpt-5-mini-preview',
-    'unicode-é', 'unicode-e\u0301', 'Claude', 'claude',
-  ].map(record));
-  expect(resolvePrice(index, 'openrouter/anthropic/claude-sonnet-4.5-2025-09-29-thinking')).toMatchObject({
-    priced_model: 'claude-sonnet-4-5', match_type: 'normalized',
-  });
-  expect(resolvePrice(index, 'claude-sonnet-4-5-20250929-thinking')).toMatchObject({
-    priced_model: 'claude-sonnet-4-5', match_type: 'normalized',
-  });
-  expect(resolvePrice(index, 'gpt-5-mini')).toEqual({
-    priced_model: null, match_type: 'ambiguous', candidates: ['azure/gpt-5-mini-20250101', 'openai/gpt-5-mini-20250102'],
-  });
-  expect(resolvePrice(index, 'gpt-5-mini-preview-20250101').priced_model).toBe('gpt-5-mini-preview');
-  expect(resolvePrice(index, 'gpt-5-opus').priced_model).toBeNull();
-  expect(resolvePrice(index, 'Claude').priced_model).toBe('Claude');
-  expect(resolvePrice(index, 'CLAUDE').priced_model).toBeNull();
-  expect(resolvePrice(index, 'unicode-e\u0301').priced_model).toBe('unicode-e\u0301');
-  expect(resolvePrice(index, 'unicode-é').priced_model).toBe('unicode-é');
-  expect(resolvePrice(index, null).match_type).toBe('none');
-  expect(['𐀀', '\ue000', 'é', 'z'].sort(compareModelNames)).toEqual(['z', 'é', '\ue000', '𐀀']);
-
-  for (let i = 0; i < 1030; i++) resolvePrice(index, 'missing-' + i);
-  expect(index.memo.size).toBe(1024);
-  expect(index.memo.has('missing-0')).toBe(false);
-  for (const id of [' ', 'é'.repeat(257), '\u0000', '\ud800']) {
-    expect(resolvePrice(index, id).match_type).toBe('none');
-    expect(index.memo.has(id)).toBe(false);
-  }
-});
-
-it('quantizes bounded token and million-token decimal rates exactly', () => {
-  expect(quantizeRate('4.999e-13')).toBe(0);
-  expect(quantizeRate('5e-13')).toBe(1);
-  expect(quantizeRate('5.001e-13')).toBe(1);
-  expect(quantizeRate('1.1515e-9')).toBe(1152);
-  expect(quantizeRate('0.0000005', 'usd_per_million')).toBe(1);
-  expect(quantizeRate('1000', 'usd_per_million')).toBe(1_000_000_000);
-  for (const bad of ['1000.00000000001', '1e2000', '-1e-100', '-0', '0x2', 'NaN', ' 0 ', '', Infinity, {}]) {
-    expect(quantizeRate(bad, 'usd_per_million')).toBeNull();
-  }
-});
 
 // Real local D1 (workerd via wrangler). The SQL guard in keyStateStmt is only proven by a real engine that
 // evaluates WHERE, which a hand-written fake D1 cannot do.
@@ -161,80 +106,11 @@ describe('DROP-01 request-path guard (real local D1)', () => {
       .map((s) => s.trim())
       .filter(Boolean);
     for (const stmt of statements) await db.prepare(stmt).run();
-    await db.prepare("INSERT INTO request_logs (id, ts, upstream_model, input_tokens) VALUES (900, 1, 'legacy-model', 5)").run();
-    await applyCostMigration(db);
   }, 60_000);
 
   afterAll(async () => {
     invalidateConfig();
     await proxy?.dispose();
-  });
-
-  it('cost migration preserves old logs and installs the retention interlock', async () => {
-    expect(await db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'daily_cost_rollup'").first()).toEqual({ name: 'daily_cost_rollup' });
-    const legacy = await db.prepare('SELECT * FROM request_logs WHERE id = 900').first();
-    expect(legacy).toMatchObject({
-      upstream_model: 'legacy-model', input_tokens: 5, cost_nano_usd: null, cost_reason: null,
-      priced_model: null, price_match_type: null, cache_write_tokens: null, cache_read_savings_nano_usd: null,
-    });
-    const compatible = await db.prepare("INSERT INTO request_logs (ts, upstream_model, input_tokens) VALUES (2, 'old-worker', 2)").run();
-    await expect(db.prepare('DELETE FROM request_logs WHERE id IN (900, ?)').bind(compatible.meta.last_row_id).run()).rejects.toThrow('cost_rollup_required');
-    expect(await db.prepare('SELECT COUNT(*) AS count FROM request_logs WHERE id IN (900, ?)').bind(compatible.meta.last_row_id).first()).toEqual({ count: 2 });
-    await db.prepare('UPDATE cost_rollup_progress SET before_day_ms = 86400000, through_request_id = 900').run();
-    expect((await db.prepare('DELETE FROM request_logs WHERE id = 900').run()).meta.changes).toBe(1);
-    await expect(db.prepare('DELETE FROM request_logs WHERE id = ?').bind(compatible.meta.last_row_id).run()).rejects.toThrow('cost_rollup_required');
-    await db.prepare('DELETE FROM cost_rollup_progress').run();
-    await expect(db.prepare('DELETE FROM request_logs WHERE id = ?').bind(compatible.meta.last_row_id).run()).rejects.toThrow('cost_rollup_required');
-    await db.prepare('INSERT INTO cost_rollup_progress VALUES (1, 0, 0)').run();
-    expect(Number(await db.prepare("SELECT value FROM settings WHERE key = 'cost_capture_since_ms'").first('value'))).toBeGreaterThan(0);
-  });
-
-  it('indexes usable prices and eligible saved pins with each D1 config version', async () => {
-    await db.batch([
-      db.prepare(`INSERT INTO model_prices (model, catalog_base, catalog_imported) VALUES
-        ('exact', '{"input":10}', 1), ('prior-rate', '{"input":20}', 1), ('zero', '{"input":0}', 1),
-        ('manual', '{"input":1}', 0), ('blank', '{}', 1)`),
-      db.prepare("INSERT INTO model_price_aliases VALUES ('exact', 'prior-rate'), ('route-zero', 'zero')"),
-    ]);
-    const original = await loadConfig(db);
-    expect(resolvePrice(original.prices, 'exact')).toMatchObject({ priced_model: 'prior-rate', match_type: 'pinned' });
-    expect(resolvePrice(original.prices, 'route-zero')).toMatchObject({ priced_model: 'zero', match_type: 'pinned' });
-    expect(resolvePrice(original.prices, 'blank')).toMatchObject({ priced_model: null, match_type: 'none' });
-    expect(resolvePrice(original.prices, 'anthropic/claude-20240101').match_type).toBe('none');
-    await db.batch([
-      db.prepare("UPDATE model_prices SET catalog_base = '{}' WHERE model = 'prior-rate'"),
-      db.prepare(`INSERT INTO model_prices (model, catalog_base) VALUES ('claude', '{"input":1}')`),
-      db.prepare("UPDATE settings SET value = '2' WHERE key = 'config_version'"),
-    ]);
-    const changed = await loadConfig(db);
-    expect(changed.version).toBe(2);
-    expect(resolvePrice(changed.prices, 'exact')).toMatchObject({ priced_model: 'exact', match_type: 'exact' });
-    expect(resolvePrice(changed.prices, 'anthropic/claude-20240101')).toMatchObject({ priced_model: 'claude', match_type: 'normalized' });
-    expect(resolvePrice(original.prices, 'exact').match_type).toBe('pinned');
-    expect(resolvePrice(original.prices, 'anthropic/claude-20240101').match_type).toBe('none');
-    await db.prepare(`UPDATE model_prices SET catalog_base = '{"input":0}' WHERE model = 'prior-rate'`).run();
-    expect(resolvePrice((await loadConfig(db)).prices, 'exact').match_type).toBe('pinned');
-  });
-
-  it('enforces the durable model and alias capacities on D1', async () => {
-    const fill = async (table: string, total: number) => {
-      const modelRows = table === 'model_prices';
-      const { count } = (await db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).first<{ count: number }>())!;
-      await db.prepare(`WITH RECURSIVE rows(n) AS (
-        SELECT 1 UNION ALL SELECT n + 1 FROM rows WHERE n < ?
-      ) INSERT INTO ${table} (${modelRows ? 'model' : 'upstream_model, priced_model'})
-      SELECT 'cap-' || n${modelRows ? '' : ", 'zero'"} FROM rows`).bind(total - count).run();
-    };
-    await fill('model_prices', 600);
-    await fill('model_price_aliases', 1024);
-    await db.prepare("INSERT INTO model_prices (model) VALUES ('zero') ON CONFLICT(model) DO NOTHING").run();
-    await db.prepare("INSERT INTO model_price_aliases VALUES ('route-zero', 'zero') ON CONFLICT(upstream_model) DO NOTHING").run();
-    await expect(db.prepare("INSERT INTO model_prices (model) VALUES ('beyond-bound')").run()).rejects.toThrow('model_price_capacity');
-    await expect(db.prepare("INSERT INTO model_price_aliases VALUES ('beyond-bound', 'zero')").run()).rejects.toThrow('model_alias_capacity');
-    await db.batch([
-      db.prepare("DELETE FROM model_price_aliases WHERE upstream_model GLOB 'cap-*'"),
-      db.prepare("DELETE FROM model_prices WHERE model GLOB 'cap-*'"),
-    ]);
   });
 
   async function seedKey(seed: Partial<Row> = {}): Promise<number> {
@@ -878,7 +754,6 @@ describe('drop list classification (real local D1)', () => {
       .map((s) => s.trim())
       .filter(Boolean);
     for (const stmt of statements) await db.prepare(stmt).run();
-    await applyCostMigration(db);
     await db.prepare("INSERT INTO settings (key, value) VALUES ('config_version', '1')").run();
     await db
       .prepare("INSERT INTO providers (id, name, base_url, balance_mode, recheck_mode) VALUES (1, 'drop-list-provider', 'https://drop.example', 'none', 'manual')")
@@ -1039,7 +914,6 @@ describe('provider create is atomic with its drop rule (real local D1)', () => {
       .map((s) => s.trim())
       .filter(Boolean);
     for (const stmt of statements) await db.prepare(stmt).run();
-    await applyCostMigration(db);
     await db.prepare("INSERT INTO settings (key, value) VALUES ('config_version', '1')").run();
     // A default route, so the create path has a link to write in the same batch.
     await db.prepare("INSERT INTO routes (id, name, model_patterns, is_default, position) VALUES (1, 'default', '[]', 1, 0)").run();

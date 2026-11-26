@@ -11,7 +11,6 @@ import { parseStatusCodes } from '../../dashboard/lib/status-codes';
 import { ALL_ACTIONS, ALL_FORMATS, type Env, type Provider, type ProviderKey } from '../types';
 import { checkPassword, clearSessionCookie, createSession, loginBlocked, recordLoginFailure, requireAdmin, setSessionCookie } from './auth';
 import { getStats } from './stats';
-import { pricesRoutes } from './prices';
 
 type App = { Bindings: Env };
 
@@ -256,7 +255,6 @@ const s = new Hono<App>();
 s.use('*', requireAdmin);
 
 s.get('/session', (c) => c.json({ ok: true }));
-s.route('/prices', pricesRoutes(mutate, HttpError));
 
 // ---------------- providers & keys
 
@@ -720,8 +718,8 @@ s.get('/logs', async (c) => {
   if (q.status === 'error') where.push('(status < 200 OR status >= 300)');
   if (q.status === 'failover') where.push('failovers > 0');
   if (q.model) {
-    where.push('instr(lower(model), lower(?)) > 0');
-    args.push(q.model);
+    where.push('model LIKE ?');
+    args.push(`%${q.model}%`);
   }
   const sql = `SELECT * FROM request_logs ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY id DESC LIMIT ?`;
   const rows = await c.env.DB.prepare(sql).bind(...args, limit).all();
