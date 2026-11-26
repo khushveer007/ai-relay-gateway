@@ -8,6 +8,7 @@ import { stdin, stdout } from 'node:process';
 const WRANGLER_PATH = new URL('../wrangler.jsonc', import.meta.url);
 const DEV_VARS_PATH = new URL('../.dev.vars', import.meta.url);
 const DB_NAME = 'ai-gateway';
+const PREVIEW_DB_NAME = 'ai-gateway-preview';
 
 function run(cmd, args, opts = {}) {
   const res = spawnSync(cmd, args, { stdio: 'inherit', shell: process.platform === 'win32', ...opts });
@@ -22,6 +23,20 @@ function capture(cmd, args) {
     stdio: ['ignore', 'pipe', 'pipe'],
     shell: process.platform === 'win32',
   });
+}
+
+function createDatabase(name) {
+  const out = capture('npx', ['wrangler', 'd1', 'create', name]);
+  const match = out.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+  if (!match) throw new Error(`Could not parse database_id from wrangler output:\n${out}`);
+  return match[0];
+}
+
+function setDatabaseId(config, name, id) {
+  const existing = new RegExp(`("database_name": "${name}",\\s*"database_id": ")[^"]*"`);
+  return existing.test(config)
+    ? config.replace(existing, (_match, prefix) => `${prefix}${id}"`)
+    : config.replace(`"database_name": "${name}",`, `"database_name": "${name}",\n      "database_id": "${id}",`);
 }
 
 function putSecret(name, value) {
@@ -50,45 +65,56 @@ async function main() {
 
   // 2. Ensure D1 database exists and update wrangler.jsonc
   let wranglerText = readFileSync(WRANGLER_PATH, 'utf8');
-  let dbId = null;
+  let databases = [];
 
   try {
     const listJson = capture('npx', ['wrangler', 'd1', 'list', '--json']);
     const list = JSON.parse(listJson);
-    const found = Array.isArray(list) ? list.find((d) => d.name === DB_NAME) : null;
-    if (found?.uuid) {
-      dbId = found.uuid;
-      console.log(`✓ Found existing D1 database "${DB_NAME}" (${dbId})`);
-    }
+    databases = Array.isArray(list) ? list : [];
   } catch {
     /* fallback to create */
   }
 
+  let dbId = databases.find((d) => d.name === DB_NAME)?.uuid ?? null;
   if (!dbId) {
     console.log(`→ Creating D1 database "${DB_NAME}"...`);
-    const out = capture('npx', ['wrangler', 'd1', 'create', DB_NAME]);
-    const match = out.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
-    if (!match) {
-      throw new Error(`Could not parse database_id from wrangler output:\n${out}`);
-    }
-    dbId = match[0];
+    dbId = createDatabase(DB_NAME);
     console.log(`✓ Created D1 database "${DB_NAME}" (${dbId})`);
+  } else {
+    console.log(`✓ Found existing D1 database "${DB_NAME}" (${dbId})`);
   }
 
-  if (wranglerText.includes('"database_id"')) {
-    wranglerText = wranglerText.replace(/"database_id"\s*:\s*"[^"]*"/, `"database_id": "${dbId}"`);
+  let previewDbId = databases.find((d) => d.name === PREVIEW_DB_NAME)?.uuid ?? null;
+  if (!previewDbId) {
+    console.log(`→ Creating D1 database "${PREVIEW_DB_NAME}"...`);
+    previewDbId = createDatabase(PREVIEW_DB_NAME);
+    console.log(`✓ Created D1 database "${PREVIEW_DB_NAME}" (${previewDbId})`);
   } else {
-    wranglerText = wranglerText.replace(
-      `"database_name": "${DB_NAME}",`,
-      `"database_name": "${DB_NAME}",\n      "database_id": "${dbId}",`,
-    );
+    console.log(`✓ Found existing D1 database "${PREVIEW_DB_NAME}" (${previewDbId})`);
+  }
+
+  wranglerText = setDatabaseId(wranglerText, DB_NAME, dbId);
+  wranglerText = setDatabaseId(wranglerText, PREVIEW_DB_NAME, previewDbId);
+  const migrationConfigPath = new URL('../wrangler.preview-migrations.jsonc', import.meta.url);
+  const migrationConfig = readFileSync(migrationConfigPath, 'utf8').replace(
+    /("database_id": ")[^"]*"/,
+    (_match, prefix) => `${prefix}${previewDbId}"`,
+  );
+  if (
+    !wranglerText.includes(`"database_id": "${dbId}"`) ||
+    !wranglerText.includes(`"database_id": "${previewDbId}"`) ||
+    !migrationConfig.includes(`"database_id": "${previewDbId}"`)
+  ) {
+    throw new Error('Could not update Wrangler D1 database IDs');
   }
   writeFileSync(WRANGLER_PATH, wranglerText, 'utf8');
-  console.log('✓ Updated wrangler.jsonc with database_id');
+  writeFileSync(migrationConfigPath, migrationConfig, 'utf8');
+  console.log('✓ Updated Wrangler configs with database IDs');
 
   // 3. Apply D1 migrations remotely (and locally for dev convenience)
   console.log('→ Applying D1 migrations...');
   run('npx', ['wrangler', 'd1', 'migrations', 'apply', 'DB', '--remote']);
+  run('npx', ['wrangler', 'd1', 'migrations', 'apply', 'PREVIEW_DB', '--remote', '--config', 'wrangler.preview-migrations.jsonc']);
 
   // 4. Configure secrets
   const rl = createInterface({ input: stdin, output: stdout });

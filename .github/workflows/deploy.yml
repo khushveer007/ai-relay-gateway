@@ -41,4 +41,5 @@ jobs:
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           command: |
             d1 migrations apply DB --remote
+            d1 migrations apply PREVIEW_DB --remote --config wrangler.preview-migrations.jsonc
             deploy

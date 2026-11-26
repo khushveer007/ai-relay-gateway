@@ -1,0 +1,10 @@
+{
+  "d1_databases": [
+    {
+      "binding": "PREVIEW_DB",
+      "database_name": "ai-gateway-preview",
+      "database_id": "3513f105-680f-4094-9ae4-b7f7ff2777e9",
+      "migrations_dir": "migrations"
+    }
+  ]
+}
