@@ -38,7 +38,12 @@ async function version() {
 
 beforeAll(async () => {
   proxy = await getPlatformProxy<Env>({ persist: false });
-  env = { ...proxy.env, ADMIN_PASSWORD: password, SESSION_SECRET: 'price-admin-local-session' };
+  env = {
+    ...proxy.env,
+    ADMIN_PASSWORD: password,
+    ENCRYPTION_KEY: 'price-admin-local-test-key',
+    SESSION_SECRET: 'price-admin-local-session',
+  };
   db = env.DB;
   for (const ddl of [initial, keyDrop, costMigration]) {
     await db.batch(unstable_splitSqlQuery(ddl).map((statement) => db.prepare(statement)));
