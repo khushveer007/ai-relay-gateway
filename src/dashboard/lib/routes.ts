@@ -1,5 +1,5 @@
 // Pure and DOM-free (no imports), so Vitest can load it without a browser.
-export const VIEW_IDS = ['overview', 'providers', 'routes', 'gateway-keys', 'logs', 'settings'] as const;
+export const VIEW_IDS = ['overview', 'providers', 'routes', 'gateway-keys', 'logs', 'prices', 'settings'] as const;
 
 export type ViewId = (typeof VIEW_IDS)[number];
 
@@ -9,6 +9,7 @@ export const NAV_LABEL: Record<ViewId, string> = {
   routes: 'Routes & Chains',
   'gateway-keys': 'Gateway Keys',
   logs: 'Request Logs',
+  prices: 'Prices',
   settings: 'Rules & Settings',
 };
 
@@ -27,7 +28,7 @@ export function parseHash(hash: string): ViewId {
  * VIEW_IDS without a slot, so More has to absorb it deliberately.
  */
 export const BOTTOM_VIEW_IDS = ['overview', 'providers', 'routes', 'logs'] as const;
-export const MORE_VIEW_IDS = ['gateway-keys', 'settings'] as const;
+export const MORE_VIEW_IDS = ['gateway-keys', 'prices', 'settings'] as const;
 
 /** True when the current view lives under the More slot, so the slot reads as active (D-02). */
 export function isMoreActive(view: ViewId): boolean {

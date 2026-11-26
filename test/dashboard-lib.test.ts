@@ -288,8 +288,8 @@ describe('guards', () => {
 });
 
 describe('routes', () => {
-  it('VIEW_IDS holds the six destinations in nav order', () => {
-    expect([...VIEW_IDS]).toEqual(['overview', 'providers', 'routes', 'gateway-keys', 'logs', 'settings']);
+  it('VIEW_IDS holds the seven destinations in nav order', () => {
+    expect([...VIEW_IDS]).toEqual(['overview', 'providers', 'routes', 'gateway-keys', 'logs', 'prices', 'settings']);
   });
 
   it('NAV_LABEL maps every id to its exact label', () => {
@@ -299,6 +299,7 @@ describe('routes', () => {
       routes: 'Routes & Chains',
       'gateway-keys': 'Gateway Keys',
       logs: 'Request Logs',
+      prices: 'Prices',
       settings: 'Rules & Settings',
     });
   });

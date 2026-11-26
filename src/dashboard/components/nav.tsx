@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { ArrowLeftRight, KeyRound, LayoutDashboard, Route, ScrollText, Settings, Zap, type LucideIcon } from 'lucide-react';
+import { ArrowLeftRight, KeyRound, LayoutDashboard, Route, ScrollText, Settings, Tags, Zap, type LucideIcon } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -13,6 +13,7 @@ export const NAV_ICON: Record<ViewId, LucideIcon> = {
   routes: Route,
   'gateway-keys': KeyRound,
   logs: ScrollText,
+  prices: Tags,
   settings: Settings,
 };
 
@@ -68,7 +69,7 @@ interface SidebarContentProps {
   onNavigate?: () => void;
 }
 
-/** Brand, the six destinations, the Proxy Base URL box and Sign Out. It has no data of its own, so it never loads or errors. */
+/** Brand, destinations, the Proxy Base URL box and Sign Out. */
 export function SidebarContent({ view, onSignOut, signingOut, onNavigate }: SidebarContentProps) {
   return (
     <div className="flex h-full min-h-0 flex-col gap-4 p-4">

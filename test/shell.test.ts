@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { BOTTOM_VIEW_IDS, MORE_VIEW_IDS, VIEW_IDS, isMoreActive } from '../src/dashboard/lib/routes';
+import { BOTTOM_VIEW_IDS, MORE_VIEW_IDS, NAV_LABEL, VIEW_IDS, isMoreActive, parseHash } from '../src/dashboard/lib/routes';
 
 describe('bottom bar slots (VIEW-09)', () => {
   it('BOTTOM_VIEW_IDS plus MORE_VIEW_IDS contains every view id exactly once', () => {
@@ -13,9 +13,16 @@ describe('bottom bar slots (VIEW-09)', () => {
     expect(BOTTOM_VIEW_IDS).toHaveLength(4);
   });
 
-  it('isMoreActive is true for Gateway Keys and Rules & Settings only', () => {
+  it('isMoreActive is true for Gateway Keys, Prices and Rules & Settings only', () => {
     expect(isMoreActive('gateway-keys')).toBe(true);
     expect(isMoreActive('settings')).toBe(true);
+    expect(isMoreActive('prices')).toBe(true);
     for (const id of ['overview', 'providers', 'routes', 'logs'] as const) expect(isMoreActive(id)).toBe(false);
+  });
+
+  it('resolves the Prices route and labels its More destination', () => {
+    expect(parseHash('#/prices')).toBe('prices');
+    expect(NAV_LABEL.prices).toBe('Prices');
+    expect(MORE_VIEW_IDS).toContain('prices');
   });
 });
