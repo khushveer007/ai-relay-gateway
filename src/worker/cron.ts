@@ -1,5 +1,6 @@
 import { checkBalance, testKey } from './balance';
 import { invalidateConfig } from './db/cache';
+import { cleanupRolledLogs, rollupCompletedDays } from './db/cost-rollup';
 import { bumpVersionStmt, loadConfig } from './db/repo';
 import { ACTIVE_PATCH, applyKeyPatch, patchForAction } from './routing/key-state';
 import type { Config, Env, Provider, ProviderKey } from './types';
@@ -125,16 +126,10 @@ export async function runMaintenance(env: Env): Promise<{ cooldowns: number; rec
   return { cooldowns, rechecks, balances };
 }
 
-export async function cleanupLogs(env: Env): Promise<number> {
-  const row = await env.DB.prepare("SELECT value FROM settings WHERE key = 'log_retention_days'").first<{ value: string }>();
-  const days = Math.max(1, Number(row?.value ?? 7));
-  const res = await env.DB.prepare('DELETE FROM request_logs WHERE ts < ?').bind(Date.now() - days * 86_400_000).run();
-  return res.meta.changes ?? 0;
-}
-
 export async function scheduled(event: ScheduledController, env: Env): Promise<void> {
   if (event.cron === '0 3 * * *') {
-    const deleted = await cleanupLogs(env);
+    await rollupCompletedDays(env.DB, event.scheduledTime);
+    const deleted = await cleanupRolledLogs(env.DB, event.scheduledTime);
     console.log(`log cleanup: deleted ${deleted} rows`);
     return;
   }
