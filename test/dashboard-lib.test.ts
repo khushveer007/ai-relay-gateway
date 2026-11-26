@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import * as format from '../src/dashboard/lib/format';
 import {
   actionConsequence,
   actionLabel,
@@ -10,6 +9,7 @@ import {
   fmtDateTime,
   fmtMs,
   fmtNum,
+  fmtRequestCost,
   fmtTime,
   fmtTokens,
   fmtTokensOrDash,
@@ -40,21 +40,18 @@ import {
 import { NAV_LABEL, VIEW_IDS, parseHash } from '../src/dashboard/lib/routes';
 
 it('formats frozen request cost, zero, and all missing-cost states', () => {
-  const requestCost = (format as Record<string, unknown>).fmtRequestCost as
-    (cost: number | null | undefined, reason?: 'unpriced' | 'no_usage' | null) => string;
-  expect(requestCost).toBeTypeOf('function');
-  expect(requestCost(1)).toBe('$0.000000001');
-  expect(requestCost(120_580_650)).toBe('$0.12058065');
-  expect(requestCost(999_999_999)).toBe('$0.999999999');
-  expect(requestCost(1_000_000_001)).toBe('$1.000000001');
-  expect(requestCost(1_199_999_999)).toBe('$1.199999999');
-  expect(requestCost(1_200_000_000)).toBe('$1.20');
-  expect(requestCost(Number.MAX_SAFE_INTEGER)).toBe('$9007199.254740991');
-  expect(requestCost(0)).toBe('$0.00');
-  expect(requestCost(null, 'unpriced')).toBe('Unpriced');
-  expect(requestCost(null, 'no_usage')).toBe('No usage reported');
-  expect(requestCost(null, null)).toBe('Cost unavailable');
-  expect(requestCost(undefined)).toBe('Cost unavailable');
+  expect(fmtRequestCost(1)).toBe('$0.000000001');
+  expect(fmtRequestCost(120_580_650)).toBe('$0.12058065');
+  expect(fmtRequestCost(999_999_999)).toBe('$0.999999999');
+  expect(fmtRequestCost(1_000_000_001)).toBe('$1.000000001');
+  expect(fmtRequestCost(1_199_999_999)).toBe('$1.199999999');
+  expect(fmtRequestCost(1_200_000_000)).toBe('$1.20');
+  expect(fmtRequestCost(Number.MAX_SAFE_INTEGER)).toBe('$9007199.254740991');
+  expect(fmtRequestCost(0)).toBe('$0.00');
+  expect(fmtRequestCost(null, 'unpriced')).toBe('Unpriced');
+  expect(fmtRequestCost(null, 'no_usage')).toBe('No usage reported');
+  expect(fmtRequestCost(null, null)).toBe('Cost unavailable');
+  expect(fmtRequestCost(undefined)).toBe('Cost unavailable');
 });
 
 const NOW = Date.UTC(2026, 10, 14, 12, 0, 0);

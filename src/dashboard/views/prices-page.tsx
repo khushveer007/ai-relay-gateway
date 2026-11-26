@@ -8,22 +8,15 @@ import { ResponsiveList, type ResponsiveColumn } from '@/components/responsive-l
 import { Button } from '@/components/ui/button';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { type ModelPriceResolutionDTO, type PriceDTO } from '@/lib/api';
+import { MATCH_LABEL } from '@/lib/format';
 import { REFRESH_PRICE_ERROR, refreshCatalogPrices } from '@/lib/price-catalog';
 import { PRICE_QUERY_KEY, priceModelsQuery, pricesQuery } from '@/lib/queries';
-import { RATE_FIELDS, type MatchType } from '../../shared/pricing';
+import { RATE_FIELDS } from '../../shared/pricing';
 import { AliasEditor, displayRate, hasUsablePrice, PriceEditor, RATE_LABEL } from './prices/price-dialogs';
 
 const LOAD_MESSAGE = 'Failed to load prices. Check your connection and try again.';
 const PAGE_SIZE = 50;
 const ROW_ACTION = 'h-11 md:h-8';
-const MATCH_LABEL: Record<MatchType, string> = {
-  pinned: 'Pinned alias',
-  exact: 'Exact match',
-  normalized: 'Normalized match',
-  ambiguous: 'Ambiguous match',
-  none: 'No match',
-};
-
 const unpricedColumns: ResponsiveColumn<ModelPriceResolutionDTO>[] = [
   {
     key: 'model',

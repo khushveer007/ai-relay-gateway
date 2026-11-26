@@ -117,6 +117,13 @@ export interface LogRowDTO {
   input_tokens: number | null;
   output_tokens: number | null;
   cache_tokens: number | null;
+  cache_write_tokens: number | null;
+  cost_nano_usd: number | null;
+  cost_reason: 'unpriced' | 'no_usage' | null;
+  priced_model: string | null;
+  price_match_type: MatchType | null;
+  price_tier_threshold_tokens: number | null;
+  cache_read_savings_nano_usd: number | null;
   failovers: number;
   attempts: AttemptDTO[];
   error: string | null;
