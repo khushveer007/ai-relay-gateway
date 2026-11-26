@@ -229,8 +229,8 @@ export async function handleProxy(req: Request, env: Env, ctx: ExecutionContext)
             failure = { status: 200, text, headers: res.headers, cls: classify(config.rules, provider.id, 200, text) };
           } else {
             if (provider.parse_usage) {
-              const tap = new UsageTap();
-              tap.feedText(text);
+              const tap = new UsageTap(format);
+              tap.readBody(text);
               applyUsage(log, tap.usage);
             }
             log.ttfb_ms = Date.now() - started;
@@ -346,14 +346,14 @@ function streamToClient(
   prices: PriceIndex,
   resolution: PriceResolution,
 ): Response {
-  const tap = provider.parse_usage ? new UsageTap() : null;
+  const tap = provider.parse_usage ? new UsageTap(log.format) : null;
   const reader = peek.reader;
   log.stream = true;
   log.status = res.status;
 
   let resolveDone!: () => void;
   const done = new Promise<void>((r) => (resolveDone = r));
-  ctx.waitUntil(done.then(() => writeLog(env, log, prices, resolution)));
+  ctx.waitUntil(done.then(() => writeLog(env, log, prices, resolution, tap?.hasFinalUsage === true)));
 
   let finished = false;
   const finish = (error?: string) => {
@@ -372,14 +372,14 @@ function streamToClient(
   });
 
   if (peek.done) {
-    tap?.seedHead(peek.head, peek.headText);
+    tap?.feed(peek.head);
     finish();
     return new Response(peek.head as unknown as BodyInit, { status: res.status, headers });
   }
 
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
-      tap?.seedHead(peek.head, peek.headText);
+      tap.feed(peek.head);
       if (peek.head.length > 0) controller.enqueue(peek.head);
     },
     async pull(controller) {

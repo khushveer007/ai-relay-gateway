@@ -1,11 +1,11 @@
 import { priceUsage, type PriceIndex, type PriceResolution } from '../../shared/pricing';
-import type { Attempt, Env } from '../types';
+import type { Attempt, Env, Format } from '../types';
 
 export interface LogEntry {
   ts: number;
   gateway_key_id: number | null;
   route_id: number | null;
-  format: string;
+  format: Format;
   path: string;
   model: string | null;
   upstream_model: string | null;
@@ -23,7 +23,7 @@ export interface LogEntry {
   error: string | null;
 }
 
-export function newLog(path: string, format: string): LogEntry {
+export function newLog(path: string, format: Format): LogEntry {
   return {
     ts: Date.now(),
     gateway_key_id: null,
@@ -48,14 +48,14 @@ export function newLog(path: string, format: string): LogEntry {
 }
 
 /** One INSERT per request: the only D1 write on the happy path. */
-export function writeLog(env: Env, e: LogEntry, prices: PriceIndex | null = null, resolution: PriceResolution | null = null): Promise<unknown> {
+export function writeLog(env: Env, e: LogEntry, prices: PriceIndex | null = null, resolution: PriceResolution | null = null, hasFinalUsage = true): Promise<unknown> {
   if (!env?.DB) return Promise.resolve();
   const failovers = Math.max(0, e.attempts.length - 1);
   const priced = priceUsage(prices, resolution, e.format, {
-    input: e.input_tokens,
-    output: e.output_tokens,
-    cache: e.cache_tokens,
-    cacheWrite: e.cache_write_tokens,
+    input: hasFinalUsage ? e.input_tokens : null,
+    output: hasFinalUsage ? e.output_tokens : null,
+    cache: hasFinalUsage ? e.cache_tokens : null,
+    cacheWrite: hasFinalUsage ? e.cache_write_tokens : null,
   });
   return env.DB.prepare(
     `INSERT INTO request_logs

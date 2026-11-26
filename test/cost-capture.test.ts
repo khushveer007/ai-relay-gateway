@@ -202,7 +202,7 @@ it('prices cache writes once for native Chat, relay Chat and Responses', async (
   const fetch = vi.spyOn(globalThis, 'fetch');
   try {
     for (const [path, body] of [
-      ['/v1/chat/completions', { usage: { prompt_tokens: 14573, completion_tokens: 6039,
+      ['/v1/chat/completions', { choices: [{ message: { output_tokens: 90_000 } }], usage: { prompt_tokens: 14573, completion_tokens: 6039,
         prompt_tokens_details: { cached_tokens: 7123, cached_creation_tokens: 7345 } } }],
       ['/v1/chat/completions', { usage: { prompt_tokens: 14573, completion_tokens: 6039,
         prompt_tokens_details: { cached_tokens: 7123, cache_write_tokens: 7345, cached_creation_tokens: 7345 } } }],
@@ -236,8 +236,9 @@ it('uses the original stream price after a config change and writes once after c
   ]);
   invalidateConfig();
   const enc = new TextEncoder();
-  const head = 'data: {"type":"message_start","message":{"usage":{"input_tokens":105,"cache_read_input_tokens":7123}}}\n\n';
+  const head = 'data: {"type":"message_start","message":{"usage":{"input_tokens":105,"output_tokens":1,"cache_read_input_tokens":7123}}}\n\n';
   const tail = [
+    'data: {"type":"content_block_start","content_block":{"type":"tool_use","input":{"output_tokens":90000}}}\n\n',
     'data: {"type":"message_delta","usage":{"cache_crea', 'tion_input_tokens":73', '45,"output_tokens":60', '39}}\n\n',
   ];
   let upstream!: ReadableStreamDefaultController<Uint8Array>;
@@ -295,7 +296,22 @@ it('uses the original stream price after a config change and writes once after c
     await Promise.all(cancelled.pending);
     expect(cancel).toHaveBeenCalledTimes(1);
     expect(cancelled.writes).toEqual(['request_logs']);
-    expect(await newest()).toMatchObject({ error: 'client disconnected', upstream_model: 'second-model', stream: 1 });
+    expect(await newest()).toMatchObject({
+      error: 'client disconnected', upstream_model: 'second-model', stream: 1,
+      input_tokens: 105, output_tokens: 1, cost_nano_usd: null, cost_reason: 'no_usage',
+    });
+
+    const withFinalUsage = open();
+    const finalBody = (await withFinalUsage.response).body!.getReader();
+    await finalBody.read();
+    for (const part of tail) upstream.enqueue(enc.encode(part));
+    for (const _ of tail) expect((await finalBody.read()).done).toBe(false);
+    await finalBody.cancel();
+    await Promise.all(withFinalUsage.pending);
+    expect(withFinalUsage.writes).toEqual(['request_logs']);
+    expect(await newest()).toMatchObject({
+      error: 'client disconnected', output_tokens: 6039, cost_nano_usd: 0, cost_reason: null,
+    });
   } finally {
     fetch.mockRestore();
   }
