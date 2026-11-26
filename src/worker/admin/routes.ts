@@ -11,6 +11,7 @@ import { parseStatusCodes } from '../../dashboard/lib/status-codes';
 import { ALL_ACTIONS, ALL_FORMATS, type Env, type Provider, type ProviderKey } from '../types';
 import { checkPassword, clearSessionCookie, createSession, loginBlocked, recordLoginFailure, requireAdmin, setSessionCookie } from './auth';
 import { getStats } from './stats';
+import { pricesRoutes } from './prices';
 
 type App = { Bindings: Env };
 
@@ -255,6 +256,7 @@ const s = new Hono<App>();
 s.use('*', requireAdmin);
 
 s.get('/session', (c) => c.json({ ok: true }));
+s.route('/prices', pricesRoutes(mutate, HttpError));
 
 // ---------------- providers & keys
 
