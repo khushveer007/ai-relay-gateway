@@ -1027,7 +1027,7 @@ describe('Full Proxy Failover & Admin Integration', () => {
       }) as any;
 
       env.DB.batch = (async (stmts: any[]) => {
-        if (stmts.length === 7) batchLoads++;
+        if (stmts.length === 9) batchLoads++;
         return origBatch(stmts);
       }) as any;
 

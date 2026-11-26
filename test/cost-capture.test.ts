@@ -36,9 +36,9 @@ afterAll(async () => {
 function request(path = '/v1/messages') {
   const pending: Promise<unknown>[] = [];
   const ctx = {
-    waitUntil: (promise: Promise<unknown>) => pending.push(promise),
+    waitUntil: (promise: Promise<unknown>) => { pending.push(promise); },
     passThroughOnException: () => {},
-  } as ExecutionContext;
+  } as unknown as ExecutionContext;
   return {
     response: worker.fetch(new Request('https://gw.test' + path, {
       method: 'POST',
