@@ -103,6 +103,18 @@ it('restarts a mixed-version traversal and rejects a stale or non-advancing curs
   await expect(readPriceModels()).rejects.toThrow('cursor did not advance');
 });
 
+it('continues oversized model cursors in the authenticated request body', async () => {
+  const longName = 'é'.repeat(3000);
+  const fetcher = vi.fn()
+    .mockResolvedValueOnce(page([longName], 1, longName))
+    .mockResolvedValueOnce(page(['Ω-final']));
+  vi.stubGlobal('fetch', fetcher);
+  expect((await readPriceModels()).models.map(({ upstream_model }) => upstream_model)).toEqual([longName, 'Ω-final']);
+  expect(fetcher).toHaveBeenLastCalledWith('/api/admin/prices/models', expect.objectContaining({
+    method: 'POST', body: JSON.stringify({ after: longName }), credentials: 'same-origin',
+  }));
+});
+
 it('leaves saved prices usable on catalog or submission failure', async () => {
   const fetcher = vi.fn();
   vi.stubGlobal('fetch', fetcher);

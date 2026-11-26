@@ -91,6 +91,7 @@ it('validates the full request, exact identifiers, and limits before mutation', 
     { prices: [{ model: 'missing-rate', base: { input: 1 } }] },
     { prices: [{ model: 'unknown-rate', base: { ...rates, unknown: 1 } }] },
     { prices: [{ ...valid, tier: { state: 'supported', threshold_tokens: 0, rates } }] },
+    { prices: [{ ...valid, tier: { state: 'supported', threshold_tokens: 1, rates: { ...rates, output: null } } }] },
   ]) {
     expect((await save('import', invalid)).status).toBe(400);
   }
@@ -161,6 +162,20 @@ it('resolves complete model pages, replacing catalog tiers and recovering an ine
   expect(names).not.toContain('client-only');
   expect((await save('override', { model: longName, base: { input: 1 } })).status).toBe(400);
   expect((await send(`/prices/models?after=${longName}`)).status).toBe(200);
+});
+
+it('continues a model page through a cursor too long for a request URL', async () => {
+  const longName = 'é'.repeat(3000);
+  await db.batch([
+    db.prepare('INSERT INTO request_logs (ts, upstream_model) VALUES (1, ?), (1, ?)').bind(longName, 'Ω-final'),
+  ]);
+  const response = await send('/prices/models', 'POST', JSON.stringify({ after: longName }));
+  expect(response.status).toBe(200);
+  expect(response.headers.get('cache-control')).toBe('no-store');
+  expect(await response.json()).toMatchObject({
+    models: [{ upstream_model: 'Ω-final', priced_model: null }],
+    next_after: null,
+  });
 });
 
 it('rolls the import and version back together and preserves concurrent writes', async () => {

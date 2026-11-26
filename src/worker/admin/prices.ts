@@ -53,6 +53,9 @@ export function pricesRoutes(
       throw new HttpError(400, 'invalid tier threshold');
     }
     const tierRates = rates(fields, true);
+    if (state === 'supported' && (tierRates.input === null || tierRates.output === null)) {
+      throw new HttpError(400, 'A supported tier requires input and output rates.');
+    }
     if (state !== 'supported' && RATE_FIELDS.some((field) => tierRates[field] !== null)) throw new HttpError(400, 'invalid rates for tier state');
     return { state, threshold_tokens: threshold as number | null, rates: tierRates };
   }
@@ -132,9 +135,12 @@ export function pricesRoutes(
     return c.json({ prices, next_after: page.results.length > LIMIT ? prices[LIMIT - 1].model : null, version: versionOf(version) });
   });
 
-  routes.get('/models', async (c) => {
+  routes.on(['GET', 'POST'], '/models', async (c) => {
     const db = c.env.DB;
-    const after = c.req.query('after') ?? '';
+    const cursor = c.req.method === 'POST'
+      ? shape(await boundedJson(c.req.raw), ['after'], 'model cursor').after
+      : c.req.query('after') ?? '';
+    if (typeof cursor !== 'string') throw new HttpError(400, 'Invalid model cursor.');
     const names = db.prepare(`
       SELECT DISTINCT upstream_model AS model FROM request_logs
         WHERE upstream_model IS NOT NULL AND upstream_model <> '' AND upstream_model COLLATE BINARY > ?1
@@ -145,7 +151,7 @@ export function pricesRoutes(
       UNION SELECT upstream_model FROM model_price_aliases WHERE upstream_model COLLATE BINARY > ?1
       UNION SELECT priced_model FROM model_price_aliases WHERE priced_model COLLATE BINARY > ?1
       ORDER BY model COLLATE BINARY LIMIT ?2
-    `).bind(after, LIMIT + 1);
+    `).bind(cursor, LIMIT + 1);
     let config = await getConfig(c.env);
     for (let attempt = 0; attempt < 2; attempt++) {
       const [page, version] = await db.batch<Row>([names, db.prepare(VERSION_SQL)]);

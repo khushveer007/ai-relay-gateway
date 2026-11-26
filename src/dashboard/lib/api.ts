@@ -276,9 +276,11 @@ export const priceApi = {
   list: (after: string | null) => api.get<PricePage & { prices: PriceDTO[] }>(
     '/prices' + (after === null ? '' : '?after=' + encodeURIComponent(after)),
   ),
-  models: (after: string | null) => api.get<PricePage & { models: ModelPriceResolutionDTO[] }>(
-    '/prices/models' + (after === null ? '' : '?after=' + encodeURIComponent(after)),
-  ),
+  models: (after: string | null) => after !== null && encodeURIComponent(after).length > 4096
+    ? api.post<PricePage & { models: ModelPriceResolutionDTO[] }>('/prices/models', { after })
+    : api.get<PricePage & { models: ModelPriceResolutionDTO[] }>(
+        '/prices/models' + (after === null ? '' : '?after=' + encodeURIComponent(after)),
+      ),
   import: (prices: CatalogPriceInput[]) => api.post<{ ok: true }>('/prices/import', { prices }),
   override: (input: PriceOverrideInput) => api.put<{ ok: true }>('/prices/override', input),
   pin: (upstream_model: string, priced_model: string) => api.put<{ ok: true }>('/prices/alias', { upstream_model, priced_model }),
