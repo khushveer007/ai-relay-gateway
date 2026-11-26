@@ -17,18 +17,19 @@ import {
   plainActionText,
 } from '../src/dashboard/lib/format';
 import { ALL_ACTIONS } from '../src/worker/types';
-import * as overview from '../src/dashboard/lib/overview';
 import {
   DEFAULT_RANGE,
   RANGES,
   RANGE_LABEL,
   RANGE_STORAGE_KEY,
   alignSeries,
+  droppedKeyNames,
   fillSeries,
   keyDetailText,
   keyLabel,
   parseRange,
   successRate,
+  unpricedModelNames,
 } from '../src/dashboard/lib/overview';
 import {
   DESKTOP_MIN_WIDTH_PX,
@@ -56,11 +57,8 @@ it('formats frozen request cost, zero, and all missing-cost states', () => {
 });
 
 it('counts and orders complete attention inventories before taking three names', () => {
-  const { droppedKeyNames, unpricedModelNames } = overview as Record<string, Function>;
-  expect(droppedKeyNames).toBeTypeOf('function');
-  expect(unpricedModelNames).toBeTypeOf('function');
   expect(droppedKeyNames([])).toEqual([]);
-  const key = (id: number, alias: string, status = 'invalid') => ({ id, alias, key_hint: 'hint', status });
+  const key = (id: number, alias: string, status: 'invalid' | 'disabled' | 'exhausted' = 'invalid') => ({ id, alias, key_hint: 'hint', status });
   expect(droppedKeyNames([{ name: 'Only', keys: [key(9, '')] }])).toEqual(['Only / hint']);
   expect(droppedKeyNames([
     { name: 'Zebra', keys: [key(2, 'z'), key(5, 'disabled', 'disabled')] },
@@ -71,7 +69,7 @@ it('counts and orders complete attention inventories before taking three names',
   expect(unpricedModelNames([model('only')])).toEqual(['only']);
   expect(unpricedModelNames([model('c'), model('b'), model('a'), model('b')])).toEqual(['a', 'b', 'c']);
   const laterPage = Array.from({ length: 51 }, (_, i) => model(`model-${String(i).padStart(2, '0')}`));
-  expect(unpricedModelNames([model('zero', 'zero'), ...laterPage.toReversed(), model('model-00')])).toEqual(
+  expect(unpricedModelNames([model('zero', 'zero'), ...[...laterPage].reverse(), model('model-00')])).toEqual(
     laterPage.map((entry) => entry.upstream_model),
   );
 });
