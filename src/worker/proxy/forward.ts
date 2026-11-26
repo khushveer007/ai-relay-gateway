@@ -233,9 +233,6 @@ export async function handleProxy(req: Request, env: Env, ctx: ExecutionContext)
             }
             log.ttfb_ms = Date.now() - started;
             success = new Response(text, { status: res.status, headers: gatewayHeaders(res.headers, provider, attempts) });
-            log.status = res.status;
-            log.latency_ms = Date.now() - started;
-            ctx.waitUntil(writeLog(env, log));
           }
         }
       } catch (e) {
@@ -250,6 +247,11 @@ export async function handleProxy(req: Request, env: Env, ctx: ExecutionContext)
         log.provider_id = provider.id;
         log.key_id = key.id;
         log.upstream_model = upstreamModel;
+        if (!log.stream) {
+          log.status = success.status;
+          log.latency_ms = Date.now() - started;
+          ctx.waitUntil(writeLog(env, log));
+        }
         if (key.status !== 'active') {
           ctx.waitUntil(applyKeyPatch(env, key, ACTIVE_PATCH).catch((error) => console.error('key state write failed', error)));
         }
