@@ -23,6 +23,7 @@ import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 const BASE = 'http://127.0.0.1:8787';
+const PRICE_CATALOG_URL = 'https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json';
 const DEV_VARS_PATH = new URL('../.dev.vars', import.meta.url);
 const CHECK_HEADERS = process.argv.includes('--check-headers');
 const CHECK_MOBILE = process.argv.includes('--check-mobile');
@@ -383,7 +384,7 @@ async function keyDropLifecycle(cookie, audit) {
 // ---------------------------------------------------------------------------------------------
 // --check-mobile: 360x800 audit over CDP (Node's global WebSocket, no Playwright or Puppeteer).
 
-const MOBILE_ROUTES = ['overview', 'providers', 'routes', 'gateway-keys', 'logs', 'settings'];
+const MOBILE_ROUTES = ['overview', 'providers', 'routes', 'gateway-keys', 'logs', 'prices', 'settings'];
 const MOBILE_DIALOG_BUTTONS = { providers: 'Add provider', routes: 'New route', 'gateway-keys': 'Create key', logs: 'Filters', settings: 'Add rule' };
 
 // Runs inside the page. Returns violations in document order. The documented exceptions: elements
@@ -478,6 +479,7 @@ async function connectCdp(wsUrl) {
   });
   let nextId = 0;
   const pending = new Map();
+  const listeners = new Map();
   ws.addEventListener('message', (ev) => {
     const msg = JSON.parse(String(ev.data));
     if (msg.id !== undefined && pending.has(msg.id)) {
@@ -486,6 +488,7 @@ async function connectCdp(wsUrl) {
       if (msg.error) reject(new Error(`${msg.error.message}`));
       else resolve(msg.result);
     }
+    listeners.get(msg.method)?.(msg.params);
   });
   const send = (method, params = {}) =>
     new Promise((resolve, reject) => {
@@ -506,7 +509,7 @@ async function connectCdp(wsUrl) {
     }
     return false;
   };
-  return { send, evaluate, waitFor, close: () => ws.close() };
+  return { send, evaluate, waitFor, on: (method, listener) => listeners.set(method, listener), close: () => ws.close() };
 }
 
 async function auditRoute(cdp, id, phase, nav) {
@@ -803,6 +806,336 @@ async function auditRuleCounts(cookie, cdp) {
   }
 }
 
+async function auditPricing(cdp, cookie) {
+  const api = checkedAdmin.bind(null, cookie);
+  const long = 'a-' + 'unpriced'.repeat(48);
+  const missing = 'b-no-catalog-rates';
+  const ambiguous = 'c-smoke-family-20251231-thinking';
+  const candidates = ['anthropic/c-smoke-family-20250101', 'openai/c-smoke-family-20250102'];
+  const zero = 'd-explicit-zero';
+  const legacy = 'e-legacy-cost';
+  const noUsage = 'f-no-usage';
+  const inventory = [long, missing, ambiguous, zero, ...Array.from({ length: 51 }, (_, i) => `z-smoke-${i}`)];
+  const base = {
+    input_cost_per_token: 0.000003, output_cost_per_token: 0.000015,
+    cache_read_input_token_cost: 0.0000003, cache_creation_input_token_cost: 0.00000375,
+    input_cost_per_token_above_100k_tokens: 0.000006, output_cost_per_token_above_100k_tokens: 0.00003,
+  };
+  const catalog = {
+    [candidates[0]]: base, [candidates[1]]: base, [missing]: {},
+    [zero]: Object.fromEntries(Object.keys(base).slice(0, 4).map((field) => [field, 0])),
+    unrelated: base,
+  };
+  const relay = createServer((req, res) => {
+    res.setHeader('content-type', 'application/json');
+    if (req.url.split('?')[0] === '/v1/models') return res.end(JSON.stringify({ data: [{ id: long }] }));
+    if (req.headers['x-api-key'] === 'sk-smoke-price-1') {
+      req.resume();
+      return res.writeHead(403).end(JSON.stringify({ error: { message: 'Fixture key rejection' } }));
+    }
+    let body = '';
+    req.setEncoding('utf8');
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', () => {
+      const { model } = JSON.parse(body);
+      const usage = { input_tokens: 10, output_tokens: 2, cache_read_input_tokens: 3, cache_creation_input_tokens: 1 };
+      res.end(JSON.stringify({ id: 'smoke-price', content: [], ...(model === noUsage ? {} : { usage }) }));
+    });
+  });
+  const mobile = async (width) => {
+    await cdp.send('Emulation.setDeviceMetricsOverride', { width, height: 800, deviceScaleFactor: 2, mobile: width === 360 });
+    ok(await cdp.waitFor(`innerWidth === ${width} && matchMedia('(min-width: 768px)').matches === ${width >= 768}`),
+      `pricing viewport did not reach ${width}px`);
+    await cdp.evaluate('new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))))');
+  };
+  const visible = (selector, copy) =>
+    `[...document.querySelectorAll(${JSON.stringify(selector)})].some((el) => el.getClientRects().length && el.textContent.includes(${JSON.stringify(copy)}))`;
+  const expectCopy = async (selector, copy) => ok(await cdp.waitFor(visible(selector, copy)), `pricing: missing "${copy}" in ${selector}`);
+  const group = (name) => `[aria-labelledby="needs-attention-title"] [aria-label="${name}"]`;
+  const priceTable = '[aria-labelledby="price-table-title"]';
+  const unpricedList = '[aria-labelledby="unpriced-models-title"]';
+  const rowFor = (section, model) =>
+    `[...document.querySelectorAll(${JSON.stringify(section + ' tbody tr, ' + section + ' [role=listitem]')})].find((row) => row.innerText.includes(${JSON.stringify(model)}))`;
+  const clickRow = async (section, model, label) => {
+    const button = `[...(${rowFor(section, model)})?.querySelectorAll('button') || []].find((el) => el.innerText.trim() === ${JSON.stringify(label)})`;
+    ok(await cdp.waitFor(`!!(${button})`), `pricing: "${label}" missing for ${model}`);
+    await cdp.evaluate(`(${button}).click()`);
+  };
+  const waitDialogClosed = async () => ok(await cdp.waitFor(`!document.querySelector('${DIALOG}')`), 'pricing dialog did not close');
+  const logDetail = async (model, cost, details = []) => {
+    const label = `[...document.querySelectorAll('[aria-label^="Request at"]')].find((el) =>
+      el.getAttribute('aria-label').includes(${JSON.stringify(model + ', HTTP')}) &&
+      el.getAttribute('aria-label').includes(${JSON.stringify('Cost: ' + cost)}))`;
+    ok(await cdp.waitFor(`(${label})?.innerText.includes(${JSON.stringify(cost)})`), `request row cost missing for ${model}`);
+    await cdp.evaluate(`(${label}).click()`);
+    for (const detail of ['List-price cost', cost, ...details]) await expectCopy(DIALOG, detail);
+    if ((await cdp.evaluate('innerWidth')) === 360) await checkMobileLayout(cdp, `log detail ${model}`, DIALOG);
+    await mobileClick(cdp, 'Close request details', DIALOG);
+    await waitDialogClosed();
+  };
+  let catalogHits = 0;
+  let catalogFailure = false;
+  let localFailure = '';
+  let holdPath = '';
+  let heldRequest = null;
+  let interceptionError;
+  let providerId;
+  let routeId;
+  const continueRequest = (requestId) => cdp.send('Fetch.continueRequest', { requestId });
+  const fulfill = (requestId, code, body, headers = []) => cdp.send('Fetch.fulfillRequest', {
+    requestId, responseCode: code, body: Buffer.from(JSON.stringify(body)).toString('base64'),
+    responseHeaders: [{ name: 'content-type', value: 'application/json' }, ...headers],
+  });
+  cdp.on('Fetch.requestPaused', ({ requestId, request }) => {
+    void (async () => {
+      if (request.url === PRICE_CATALOG_URL) {
+        ok(request.method === 'GET' && !Object.keys(request.headers).some((name) => /^(cookie|authorization)$/i.test(name)),
+          'catalog request sent credentials');
+        catalogHits += 1;
+        if (holdPath === 'catalog') {
+          await new Promise((resolve) => { heldRequest = resolve; });
+        }
+        await fulfill(requestId, catalogFailure ? 503 : 200, catalog, [{ name: 'access-control-allow-origin', value: '*' }]);
+        return;
+      }
+      const path = new URL(request.url).pathname;
+      if (localFailure === path) {
+        await fulfill(requestId, 503, { error: { message: 'Fixture request failed' } });
+      } else if (holdPath === path && !heldRequest) {
+        heldRequest = () => continueRequest(requestId);
+      } else {
+        await continueRequest(requestId);
+      }
+    })().catch((error) => {
+      interceptionError = error;
+      void cdp.send('Fetch.failRequest', { requestId, errorReason: 'Failed' }).catch(() => {});
+    });
+  });
+  const releaseRequest = async () => {
+    const resume = await until(() => heldRequest, `browser never requested ${holdPath}`);
+    holdPath = '';
+    heldRequest = null;
+    await resume();
+  };
+  const startNavigation = (route) => cdp.send('Page.navigate', { url: `${BASE}/?audit=${crypto.randomUUID()}#/${route}` });
+  try {
+    await cdp.send('Fetch.enable', { patterns: [{ urlPattern: PRICE_CATALOG_URL }, { urlPattern: BASE + '/api/admin/*' }] });
+    await mobileRoute(cdp, 'overview');
+    await expectCopy(group('Dropped keys'), '0');
+    await expectCopy(group('Unpriced models'), '0');
+    await mobileClick(cdp, 'More', 'nav[aria-label="Dashboard navigation"]');
+    await checkMobileLayout(cdp, 'pricing More', DIALOG);
+    await cdp.evaluate(`document.querySelector('${DIALOG} a[href="#/prices"]').click()`);
+    await expectCopy('main h1', 'Prices');
+    await waitDialogClosed();
+    await expectCopy('main', 'No prices saved.');
+    ok(await cdp.evaluate(`document.activeElement?.tagName === 'MAIN' && location.hash === '#/prices'`), 'More did not focus the Prices view');
+    await mobileClick(cdp, 'More', 'nav[aria-label="Dashboard navigation"]');
+    ok(await cdp.waitFor(`!!document.querySelector('${DIALOG} a[href="#/prices"][aria-current="page"]')`), 'More did not mark Prices current');
+    await cdp.evaluate(`document.querySelector('${DIALOG} a[href="#/prices"]').click()`);
+    await waitDialogClosed();
+
+    await once(relay.listen(0, '127.0.0.1'), 'listening');
+    ({ id: providerId } = await api('POST', '/providers', {
+      name: 'Price fixture', base_url: `http://127.0.0.1:${relay.address().port}`, keys: 'sk-smoke-price-1\nsk-smoke-price-2',
+      formats: ['anthropic'], parse_usage: true, add_to_default: false, drop_codes: '403',
+    }, 201));
+    await mobileRoute(cdp, 'overview');
+    await expectCopy(group('Unpriced models'), long);
+    ok((await cdp.evaluate(`document.querySelector('${group('Unpriced models')}').querySelectorAll('li').length`)) === 1,
+      'a single unpriced model must render one preview name');
+    await mobileRoute(cdp, 'prices');
+    await clickRow(unpricedList, long, 'Pin alias');
+    await expectCopy(DIALOG, 'No priced catalog models available.');
+    ok(await cdp.evaluate(`[...document.querySelectorAll('${DIALOG} button')].some((button) => button.innerText === 'Save alias' && button.disabled)`),
+      'the empty alias picker must disable Save alias');
+    await mobileClick(cdp, 'Cancel alias edit', DIALOG);
+    await waitDialogClosed();
+
+    await api('PUT', `/providers/${providerId}`, { model_map: Object.fromEntries(inventory.map((model) => [model, model])) });
+    const provider = (await api('GET', '/providers')).providers.find(({ id }) => id === providerId);
+    await api('PUT', `/keys/${provider.keys[0].id}`, { alias: 'Dropped fixture' });
+    ({ id: routeId } = await api('POST', '/routes', {
+      name: 'Pricing smoke route', model_patterns: ['*'], provider_ids: [providerId],
+    }, 201));
+    const { key } = await api('POST', '/gateway-keys', { name: 'Pricing smoke key', route_id: routeId }, 201);
+    const proxy = async (model) => {
+      const response = await fetch(BASE + '/v1/messages', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
+        body: JSON.stringify({ model, max_tokens: 2, messages: [{ role: 'user', content: 'hi' }] }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      ok(response.ok && (await response.json()).id === 'smoke-price', `pricing proxy did not succeed for ${model}`);
+      return until(async () => (await api('GET', '/logs')).logs.find((log) => log.model === model),
+        `pricing proxy log did not commit for ${model}`);
+    };
+
+    localFailure = '/api/admin/prices';
+    await mobileRoute(cdp, 'prices');
+    await expectCopy('main', 'Failed to load prices.');
+    localFailure = '';
+    await cdp.evaluate(`document.querySelector('[aria-label="Retry loading prices"]').click()`);
+    await expectCopy('main', 'No prices saved.');
+    holdPath = 'catalog';
+    await mobileClick(cdp, 'Refresh prices');
+    await expectCopy('main', 'Refreshing prices…');
+    ok(await cdp.evaluate(`[...document.querySelectorAll('main button')].some((button) => button.innerText === 'Refreshing prices…' && button.disabled)`),
+      'catalog refresh must block a duplicate submit');
+    await expectCopy(priceTable, 'No prices saved.');
+    await releaseRequest();
+    await expectCopy(priceTable, candidates[0]);
+    await expectCopy(priceTable, '$0.00');
+    await expectCopy(unpricedList, missing);
+    ok(!(await cdp.evaluate(visible(unpricedList, zero))), 'zero price must leave the unpriced list');
+    await expectCopy(unpricedList, 'Multiple matches. Choose a model to pin.');
+    const imported = (await api('GET', '/prices')).prices;
+    ok(imported.length === 4 && imported.every((price) => price.model !== 'unrelated') && imported.find((price) => price.model === missing).effective_base.input === null,
+      'browser did not import the complete relevant slim catalog');
+    ok(catalogHits === 1, `expected one catalog request, got ${catalogHits}`);
+    catalogFailure = true;
+    await mobileClick(cdp, 'Refresh prices');
+    await expectCopy('main [role=alert]', 'The last saved prices are still in use.');
+    await expectCopy(priceTable, candidates[0]);
+    catalogFailure = false;
+    await checkMobileLayout(cdp, 'Prices with imported and unpriced rows');
+    ok(await cdp.evaluate(`(${wrapsText.toString()})([...(${rowFor(unpricedList, long)}).querySelectorAll('span')].find((el) => el.textContent === ${JSON.stringify(long)}))`),
+      '360px unpriced model did not wrap');
+
+    await clickRow(unpricedList, ambiguous, 'Pin alias');
+    await expectCopy(DIALOG, 'Matching candidates');
+    ok(await cdp.evaluate(`document.getElementById('priced-catalog-model').value === '' &&
+      JSON.stringify([...document.querySelectorAll('[label="Matching candidates"] option')].map((el) => el.value)) === ${JSON.stringify(JSON.stringify(candidates))}`),
+      'ambiguous alias picker must list candidates in order with no automatic selection');
+    await checkMobileLayout(cdp, 'ambiguous alias', DIALOG);
+    await setMobileField(cdp, 'priced-catalog-model', candidates[0]);
+    await mobileClick(cdp, 'Save alias', DIALOG);
+    await waitDialogClosed();
+    ok(await cdp.waitFor(`!(${rowFor(unpricedList, ambiguous)})`), 'pin did not refresh the unpriced list');
+    const captured = await proxy(ambiguous);
+    ok(captured.cost_nano_usd === 64_650 && captured.priced_model === candidates[0] && captured.price_match_type === 'pinned',
+      'real proxy request did not persist expected pinned price and cost');
+    ok((await proxy(zero)).cost_nano_usd === 0, 'explicit zero amount did not persist');
+    ok((await proxy(noUsage)).cost_reason === 'no_usage', 'no-usage reason did not persist');
+    ok((await proxy(long)).cost_reason === 'unpriced', 'unpriced reason did not persist');
+
+    const legacySql = `INSERT INTO request_logs (ts, model, upstream_model, status, format, path) VALUES (${Date.now()}, '${legacy}', '${legacy}', 200, 'anthropic', '/v1/messages')`;
+    const legacyInsert = spawnSync('npx', ['--no-install', 'wrangler', 'd1', 'execute', 'DB', '--local',
+      '--persist-to', persistence, '--command', legacySql], { stdio: 'ignore', timeout: 30_000 });
+    ok(legacyInsert.status === 0, 'could not write a legacy request on disposable local D1');
+    await mobileRoute(cdp, 'logs');
+    await logDetail(ambiguous, '$0.00006465', [candidates[0], 'Pinned alias', 'Cache read', 'Cache write']);
+    await logDetail(zero, '$0.00');
+    await logDetail(noUsage, 'No usage reported');
+    await logDetail(long, 'Unpriced');
+    await logDetail(legacy, 'Cost unavailable', ['Pricing details weren’t recorded for this request.']);
+
+    await mobileRoute(cdp, 'prices');
+    await clickRow(priceTable, candidates[0], 'Edit price');
+    await setMobileField(cdp, 'price-base-input', '7.5');
+    await setMobileField(cdp, 'price-base-output', '20');
+    ok(await cdp.waitFor(`document.querySelector('${DIALOG}')?.getBoundingClientRect().bottom <= innerHeight + 0.5`),
+      'phone price drawer did not settle into the viewport');
+    await checkMobileLayout(cdp, 'price edit and sticky footer', DIALOG);
+    const footerBox = await cdp.evaluate(`(() => {
+      const dialog = document.querySelector('${DIALOG}');
+      const field = document.getElementById('price-tier-cache_write');
+      field.scrollIntoView({ block: 'end' });
+      const save = [...dialog.querySelectorAll('button')].find((button) => button.innerText === 'Save price');
+      const box = save.getBoundingClientRect();
+      return { top: box.top, bottom: box.bottom, height: box.height, viewport: innerHeight, dialogTop: dialog.getBoundingClientRect().top };
+    })()`);
+    ok(footerBox.top >= footerBox.dialogTop - 0.5 && footerBox.bottom <= footerBox.viewport + 0.5 && footerBox.height >= 43.5,
+      `price editor footer is not reachable after scrolling the rate fields: ${JSON.stringify(footerBox)}`);
+    await mobile(768);
+    ok(await cdp.waitFor(`document.querySelector('[data-slot="dialog-content"] input#price-base-input')?.value === '7.5'`),
+      'price draft did not survive switching from drawer to dialog at 768px');
+    await mobile(360);
+    ok(await cdp.waitFor(`document.querySelector('[data-slot="drawer-content"] input#price-base-output')?.value === '20'`),
+      'price draft did not survive switching back to the drawer');
+    localFailure = '/api/admin/prices/override';
+    await mobileClick(cdp, 'Save price', DIALOG);
+    await expectCopy(DIALOG, 'Couldn’t save the price.');
+    ok(await cdp.evaluate(`document.getElementById('price-base-input').value === '7.5'`), 'a failed save cleared the price draft');
+    localFailure = '';
+    holdPath = '/api/admin/prices/override';
+    await mobileClick(cdp, 'Save price', DIALOG);
+    await expectCopy(DIALOG, 'Saving price…');
+    await releaseRequest();
+    await waitDialogClosed();
+    await expectCopy(priceTable, '$7.50');
+    await mobileClick(cdp, 'Refresh prices');
+    await expectCopy('body', 'Prices refreshed.');
+    await expectCopy(priceTable, '$7.50');
+    await clickRow(priceTable, candidates[0], 'Edit price');
+    await mobileClick(cdp, 'Use catalog rate', DIALOG);
+    ok(await cdp.evaluate(`document.getElementById('price-base-input').value === '3' && document.getElementById('price-base-output').value === '20'`),
+      'reset did not apply to exactly one field in the draft');
+    await mobileClick(cdp, 'Save price', DIALOG);
+    await waitDialogClosed();
+    const saved = (await api('GET', '/prices')).prices.find((price) => price.model === candidates[0]);
+    ok(saved.effective_base.input === 3_000_000 && saved.effective_base.output === 20_000_000, 'one-field reset did not preserve the other override');
+    await api('PUT', '/prices/alias', { upstream_model: ambiguous, priced_model: candidates[1] });
+
+    await mobile(1280);
+    await mobileRoute(cdp, 'logs');
+    ok(await cdp.waitFor(`[...document.querySelectorAll('th')].some((el) => el.innerText === 'Cost')`), 'desktop Cost column missing');
+    await logDetail(ambiguous, '$0.00006465', [candidates[0], 'Pinned alias']);
+    const after = (await api('GET', `/logs?model=${ambiguous}`)).logs.find((log) => log.id === captured.id);
+    ok(JSON.stringify(after) === JSON.stringify(captured), 'price and alias edits changed a captured row');
+    await mobile(768);
+    await mobileRoute(cdp, 'logs');
+    ok(await cdp.evaluate(`document.documentElement.scrollWidth <= innerWidth && [...document.querySelectorAll('main [data-slot]')].some((el) => el.scrollWidth > el.clientWidth && /auto|scroll/.test(getComputedStyle(el).overflowX))`),
+      '768px logs table must scroll within its list');
+
+    const dropped = group('Dropped keys');
+    const unpriced = group('Unpriced models');
+    localFailure = '/api/admin/providers';
+    holdPath = '/api/admin/prices/models';
+    await startNavigation('overview');
+    ok(await cdp.waitFor(`!!document.querySelector('${unpriced} [data-slot="skeleton"]') &&
+      !document.querySelector('${unpriced} p[aria-label]')`), 'pending model inventory must show a skeleton without a zero');
+    await releaseRequest();
+    await expectCopy(dropped, 'Couldn’t load dropped keys.');
+    await expectCopy(unpriced, '+52 more');
+    ok(await cdp.evaluate(`JSON.stringify([...document.querySelectorAll('${unpriced} li')].map((el) => el.innerText)) ===
+      ${JSON.stringify(JSON.stringify([long, missing, legacy, '+52 more']))}`), 'Overview did not render the complete ordered model preview');
+    ok(await cdp.evaluate(`!!document.querySelector('${dropped} a[href="#/providers"]') && !!document.querySelector('${unpriced} a[href="#/prices"]')`),
+      'Overview destinations are absent during a partial failure');
+    localFailure = '/api/admin/prices/models';
+    await cdp.evaluate(`document.querySelector('[aria-label="Refresh overview"]').click()`);
+    await expectCopy(unpriced, 'Couldn’t load unpriced models.');
+    await expectCopy(dropped, 'Price fixture / Dropped fixture');
+    await expectCopy('main', 'Traffic & Errors');
+    localFailure = '';
+    await cdp.evaluate(`document.querySelector('[aria-label="Refresh overview"]').click()`);
+    await expectCopy(unpriced, missing);
+    ok(await cdp.evaluate(`Math.abs(document.querySelector('${dropped}').offsetWidth - document.querySelector('${unpriced}').offsetWidth) < 2`),
+      '768px Overview attention columns are not equal');
+    await mobile(360);
+    await mobileRoute(cdp, 'overview');
+    await expectCopy(unpriced, missing);
+    await checkMobileLayout(cdp, 'Overview attention');
+    ok(await cdp.evaluate(`document.querySelector('${dropped}').getBoundingClientRect().bottom <= document.querySelector('${unpriced}').getBoundingClientRect().top`),
+      '360px Overview attention groups did not stack');
+    if (interceptionError) throw interceptionError;
+    report(true, 'Phase 4 pricing, frozen Request Logs and Overview', 'real local D1 and built Chromium at 360, 768 and 1280px');
+  } finally {
+    try {
+      if (heldRequest) await heldRequest();
+      await cdp.send('Fetch.disable');
+      if (routeId !== undefined) {
+        const { keys } = await api('GET', '/gateway-keys');
+        for (const key of keys) if (key.route_id === routeId) await api('DELETE', `/gateway-keys/${key.id}`);
+        await api('DELETE', `/routes/${routeId}`);
+      }
+      if (providerId !== undefined) await api('DELETE', `/providers/${providerId}`);
+    } finally {
+      if (relay.listening) await new Promise((resolve) => relay.close(resolve));
+    }
+  }
+}
+
 async function checkMobile(cookie) {
   const chrome = findChrome();
   if (!chrome) {
@@ -833,6 +1166,7 @@ async function checkMobile(cookie) {
     await cdp.send('Network.setCookie', { name, value: rest.join('='), url: BASE, path: '/api', httpOnly: true, sameSite: 'Strict' });
 
     const nav = await auditAllRoutes(cdp, 'empty-db', 0);
+    await auditPricing(cdp, cookie);
     await keyDropLifecycle(cookie, async (fixture) => {
       await auditAllRoutes(cdp, 'seeded', nav);
       await auditDropUi(cdp, fixture);
@@ -1006,7 +1340,11 @@ async function main() {
       ['x-content-type-options', (v) => v.toLowerCase() === 'nosniff'],
       ['x-frame-options', (v) => v.toUpperCase() === 'DENY'],
       ['referrer-policy', (v) => v.toLowerCase() === 'no-referrer'],
-      ['content-security-policy', (v) => v.includes("default-src 'self'") && v.includes("frame-ancestors 'none'")],
+      ['content-security-policy', (v) => {
+        const connect = v.split(';').map((d) => d.trim()).filter((d) => d.startsWith('connect-src '));
+        return v.includes("default-src 'self'") && v.includes("frame-ancestors 'none'") &&
+          connect.length === 1 && connect[0].split(/\s+/).slice(1).sort().join(' ') === "'self' https://raw.githubusercontent.com";
+      }],
     ];
     const securityProblems = (res) => SECURITY.filter(([name, ok]) => !ok(res.headers.get(name) || '')).map(([name]) => name);
     for (const path of ['/', '/some/unknown/path']) {
@@ -1014,7 +1352,7 @@ async function main() {
       await res.arrayBuffer();
       const missing = securityProblems(res);
       report(
-        res.status === 200 && missing.length === 0,
+        res.status === 200 && missing.length === 0 && !/\bimmutable\b/i.test(res.headers.get('cache-control') || ''),
         `check 12: GET ${path} carries the security headers and the CSP`,
         `status ${res.status}${missing.length ? `, missing or wrong: ${missing.join(', ')}` : ''}`,
       );
