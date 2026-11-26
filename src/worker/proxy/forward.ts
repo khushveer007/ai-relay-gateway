@@ -379,7 +379,7 @@ function streamToClient(
 
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
-      tap.feed(peek.head);
+      tap?.feed(peek.head);
       if (peek.head.length > 0) controller.enqueue(peek.head);
     },
     async pull(controller) {

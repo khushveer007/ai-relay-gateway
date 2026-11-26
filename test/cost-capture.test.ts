@@ -317,7 +317,7 @@ it('uses the original stream price after a config change and writes once after c
   }
 });
 
-it('distinguishes no usage, unpriced usage and zero for plain requests', async () => {
+it('distinguishes unavailable and zero costs, including streams with parsing disabled', async () => {
   await db.batch([
     db.prepare('UPDATE route_providers SET position = CASE provider_id WHEN 11 THEN 0 ELSE 1 END'),
     db.prepare('UPDATE providers SET parse_usage = 1 WHERE id = 11'),
@@ -342,6 +342,15 @@ it('distinguishes no usage, unpriced usage and zero for plain requests', async (
     expect(await call({ usage: { input_tokens: 4, cache_creation_input_tokens: 6 } })).toMatchObject({
       input_tokens: null, cache_write_tokens: null, priced_model: 'first-model', cost_reason: 'no_usage', cost_nano_usd: null,
     });
+
+    const body = 'data: {"type":"message_start","message":{"usage":{"input_tokens":4}}}\n\n';
+    fetch.mockResolvedValueOnce(new Response(body, { headers: { 'content-type': 'text/event-stream' } }));
+    const flow = request();
+    const response = await flow.response;
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe(body);
+    await Promise.all(flow.pending);
+    expect(await newest()).toMatchObject({ stream: 1, input_tokens: null, cost_reason: 'no_usage', cost_nano_usd: null });
   } finally {
     fetch.mockRestore();
   }
