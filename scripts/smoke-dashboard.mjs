@@ -875,6 +875,7 @@ async function auditPricing(cdp, cookie) {
   };
   let catalogHits = 0;
   let catalogFailure = false;
+  let aliasSaves = 0;
   let localFailure = '';
   let holdPath = '';
   let heldRequest = null;
@@ -899,6 +900,7 @@ async function auditPricing(cdp, cookie) {
         return;
       }
       const path = new URL(request.url).pathname;
+      if (path === '/api/admin/prices/alias' && request.method === 'PUT') aliasSaves += 1;
       if (localFailure === path) {
         await fulfill(requestId, 503, { error: { message: 'Fixture request failed' } });
       } else if (holdPath === path && !heldRequest) {
@@ -934,6 +936,18 @@ async function auditPricing(cdp, cookie) {
     ok(await cdp.waitFor(`!!document.querySelector('${DIALOG} a[href="#/prices"][aria-current="page"]')`), 'More did not mark Prices current');
     await cdp.evaluate(`document.querySelector('${DIALOG} a[href="#/prices"]').click()`);
     await waitDialogClosed();
+
+    for (const [path, section, empty] of [
+      ['/api/admin/prices', priceTable, 'No prices saved.'],
+      ['/api/admin/prices/models', unpricedList, 'No unpriced models found.'],
+    ]) {
+      holdPath = path;
+      await startNavigation('prices');
+      ok(await cdp.waitFor(visible(section + ' [data-slot="skeleton"]', '')), `missing pending state for ${path}`);
+      ok(!(await cdp.evaluate(visible(section, empty))), `empty state appeared before ${path} loaded`);
+      await releaseRequest();
+      await expectCopy(section, empty);
+    }
 
     await once(relay.listen(0, '127.0.0.1'), 'listening');
     ({ id: providerId } = await api('POST', '/providers', {
@@ -1011,7 +1025,19 @@ async function auditPricing(cdp, cookie) {
       'ambiguous alias picker must list candidates in order with no automatic selection');
     await checkMobileLayout(cdp, 'ambiguous alias', DIALOG);
     await setMobileField(cdp, 'priced-catalog-model', candidates[0]);
+    holdPath = '/api/admin/prices/alias';
     await mobileClick(cdp, 'Save alias', DIALOG);
+    await expectCopy(DIALOG, 'Saving alias…');
+    const pendingButtons = `[...document.querySelectorAll('${DIALOG} button')].filter((button) => ['Saving alias…', 'Cancel alias edit'].includes(button.innerText.trim()))`;
+    ok(await cdp.evaluate(`(${pendingButtons}).length === 2 && (${pendingButtons}).every((button) => button.disabled)`),
+      'pending alias mutation did not disable save and cancel');
+    await cdp.evaluate(`(${pendingButtons}).forEach((button) => button.click())`);
+    for (const type of ['keyDown', 'keyUp']) {
+      await cdp.send('Input.dispatchKeyEvent', { type, key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+    }
+    await expectCopy(DIALOG, 'Saving alias…');
+    ok(aliasSaves === 1, 'pending alias save allowed a duplicate mutation');
+    await releaseRequest();
     await waitDialogClosed();
     ok(await cdp.waitFor(`!(${rowFor(unpricedList, ambiguous)})`), 'pin did not refresh the unpriced list');
     ok(await cdp.waitFor(`document.activeElement?.id === 'unpriced-models-title'`),
