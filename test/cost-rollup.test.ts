@@ -3,6 +3,7 @@ import { getPlatformProxy, unstable_splitSqlQuery } from 'wrangler';
 import initial from '../migrations/0001_init.sql?raw';
 import keyDrop from '../migrations/0002_key_drop.sql?raw';
 import costMigration from '../migrations/0003_cost_capture.sql?raw';
+import { cleanupRolledLogs } from '../src/worker/db/cost-rollup';
 import worker from '../src/worker/index';
 import type { Env } from '../src/worker/types';
 
@@ -41,6 +42,15 @@ async function groups() {
 async function timestamps() {
   const { results } = await db.prepare('SELECT ts FROM request_logs ORDER BY ts').all<{ ts: number }>();
   return results.map(({ ts }) => ts);
+}
+
+function progress() {
+  return db.prepare('SELECT before_day_ms, through_request_id FROM cost_rollup_progress WHERE id = 1').first();
+}
+
+function addLog(ts: number, model: string, cost: number) {
+  return db.prepare('INSERT INTO request_logs (ts, upstream_model, cost_nano_usd) VALUES (?, ?, ?)')
+    .bind(ts, model, cost).run();
 }
 
 it('rolls up completed UTC days before the scheduled retention cleanup', async () => {
@@ -89,4 +99,124 @@ it('rolls up completed UTC days before the scheduled retention cleanup', async (
     expect.objectContaining({ day_start_ms: TODAY, upstream_model: 'current', provider_id: 11, gateway_key_id: 21, cost_nano_usd: 37 }),
   ]));
   expect(await timestamps()).toEqual([TODAY - 1, TODAY, TODAY + DAY]);
+});
+
+it('reruns empty, concurrent, and stale events without regressing or double counting', async () => {
+  await Promise.all([schedule(), schedule()]);
+  expect(await progress()).toEqual({ before_day_ms: TODAY, through_request_id: 0 });
+  await addLog(OLD, 'maintenance-check', 1);
+  await schedule(DAILY, '*/15 * * * *');
+  expect(await groups()).toEqual([]);
+  expect(await timestamps()).toEqual([OLD]);
+  await Promise.all([schedule(), schedule(), schedule()]);
+  expect(await groups()).toEqual([expect.objectContaining({ request_count: 1, cost_nano_usd: 1 })]);
+  expect(await timestamps()).toEqual([]);
+  await schedule();
+  await addLog(TODAY, 'closed-after-midnight', 7);
+  await schedule();
+  await expect(db.prepare('DELETE FROM request_logs WHERE ts = ?').bind(TODAY).run()).rejects.toThrow('cost_rollup_required');
+  await schedule(DAILY + DAY);
+  const committed = await progress();
+  expect(committed).toEqual({ before_day_ms: TODAY + DAY, through_request_id: 2 });
+  await schedule(DAILY - DAY);
+  expect(await progress()).toEqual(committed);
+  expect(await groups()).toEqual([
+    expect.objectContaining({ request_count: 1, cost_nano_usd: 1 }),
+    expect.objectContaining({ request_count: 1, cost_nano_usd: 7 }),
+  ]);
+});
+
+it('retains rolled detail and rolls back the new delta when progress cannot commit', async () => {
+  const becomesOld = TODAY - 7 * DAY;
+  await addLog(becomesOld, 'already-rolled', 5);
+  await schedule();
+  const beforeGroups = await groups();
+  const beforeProgress = await progress();
+  await addLog(OLD, 'new-delta', 2);
+  await db.prepare(`CREATE TRIGGER abort_progress BEFORE UPDATE ON cost_rollup_progress
+    WHEN EXISTS (SELECT 1 FROM daily_cost_rollup WHERE upstream_model = 'new-delta')
+    BEGIN SELECT RAISE(ABORT, 'fixture_progress_failure'); END`).run();
+
+  await expect(schedule(DAILY + DAY)).rejects.toThrow('fixture_progress_failure');
+  expect(await groups()).toEqual(beforeGroups);
+  expect(await progress()).toEqual(beforeProgress);
+  expect(await timestamps()).toEqual([OLD, becomesOld]);
+
+  await db.prepare(`CREATE TRIGGER abort_cleanup BEFORE DELETE ON request_logs
+    BEGIN SELECT RAISE(ABORT, 'fixture_cleanup_failure'); END`).run();
+  await db.prepare('DROP TRIGGER abort_progress').run();
+  await expect(schedule(DAILY + DAY)).rejects.toThrow('fixture_cleanup_failure');
+  const committed = await groups();
+  expect(committed).toEqual([
+    expect.objectContaining({ upstream_model: 'new-delta', request_count: 1, cost_nano_usd: 2 }),
+    expect.objectContaining({ upstream_model: 'already-rolled', request_count: 1, cost_nano_usd: 5 }),
+  ]);
+  expect(await progress()).toEqual({ before_day_ms: TODAY + DAY, through_request_id: 2 });
+  expect(await timestamps()).toEqual([OLD, becomesOld]);
+
+  await db.prepare('DROP TRIGGER abort_cleanup').run();
+  await schedule(DAILY + DAY);
+  expect(await groups()).toEqual(committed);
+  expect(await timestamps()).toEqual([]);
+});
+
+it('adds late stream logs from retained and purged days exactly once', async () => {
+  const retained = TODAY - DAY;
+  await addLog(OLD, 'late', 11);
+  await addLog(retained, 'late', 7);
+  await schedule();
+  expect(await timestamps()).toEqual([retained]);
+  expect(await progress()).toEqual({ before_day_ms: TODAY, through_request_id: 2 });
+
+  await addLog(OLD + 1, 'late', 13);
+  await addLog(retained + 1, 'late', 5);
+  await expect(db.prepare('DELETE FROM request_logs WHERE ts = ?').bind(OLD + 1).run()).rejects.toThrow('cost_rollup_required');
+  expect(await cleanupRolledLogs(db, DAILY)).toBe(0);
+  expect(await timestamps()).toEqual([OLD + 1, retained, retained + 1]);
+  await Promise.all([schedule(), schedule()]);
+  expect(await groups()).toEqual([
+    expect.objectContaining({ day_start_ms: OLD, request_count: 2, cost_nano_usd: 24 }),
+    expect.objectContaining({ day_start_ms: retained, request_count: 2, cost_nano_usd: 12 }),
+  ]);
+  expect(await timestamps()).toEqual([retained, retained + 1]);
+});
+
+it('blocks the old Worker delete during the migration overlap and rolls its old-format log', async () => {
+  await db.prepare("INSERT INTO request_logs (ts, upstream_model, input_tokens) VALUES (?, 'old-worker', 17)").bind(OLD).run();
+  await expect(db.prepare('DELETE FROM request_logs WHERE ts < ?').bind(DAILY - 7 * DAY).run())
+    .rejects.toThrow('cost_rollup_required');
+  expect(await timestamps()).toEqual([OLD]);
+  await schedule();
+  expect(await groups()).toEqual([expect.objectContaining({ upstream_model: 'old-worker', legacy_count: 1, priced_count: 0 })]);
+  expect(await timestamps()).toEqual([]);
+});
+
+it('retains source detail if progress is missing or integer cost overflows', async () => {
+  await db.prepare(`INSERT INTO request_logs (ts, upstream_model, cost_nano_usd)
+    VALUES (?1, 'large', 9223372036854775807)`).bind(OLD).run();
+  await db.prepare('DELETE FROM cost_rollup_progress').run();
+  await expect(schedule()).rejects.toThrow('Cost rollup progress row is missing');
+  expect(await cleanupRolledLogs(db, DAILY)).toBe(0);
+  expect(await timestamps()).toEqual([OLD]);
+  expect(await groups()).toEqual([]);
+
+  await db.prepare('INSERT INTO cost_rollup_progress VALUES (1, 0, 0)').run();
+  await addLog(OLD + 1, 'large', 1);
+  await expect(schedule()).rejects.toThrow('integer overflow');
+  expect(await groups()).toEqual([]);
+  expect(await progress()).toEqual({ before_day_ms: 0, through_request_id: 0 });
+  expect(await timestamps()).toEqual([OLD, OLD + 1]);
+});
+
+it('uses a whole-day retention cutoff and keeps at least one preceding UTC day', async () => {
+  await db.prepare("UPDATE settings SET value = '0' WHERE key = 'log_retention_days'").run();
+  await addLog(TODAY - DAY - 1, 'expired', 2);
+  await addLog(TODAY - DAY, 'retained', 3);
+  await addLog(TODAY, 'live', 4);
+  await schedule();
+  expect(await timestamps()).toEqual([TODAY - DAY, TODAY]);
+  expect(await groups()).toEqual([
+    expect.objectContaining({ upstream_model: 'expired', cost_nano_usd: 2 }),
+    expect.objectContaining({ upstream_model: 'retained', cost_nano_usd: 3 }),
+  ]);
 });
