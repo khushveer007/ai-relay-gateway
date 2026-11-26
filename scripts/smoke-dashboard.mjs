@@ -951,6 +951,8 @@ async function auditPricing(cdp, cookie) {
       'the empty alias picker must disable Save alias');
     await mobileClick(cdp, 'Cancel alias edit', DIALOG);
     await waitDialogClosed();
+    ok(await cdp.waitFor(`document.activeElement?.getAttribute('aria-label')?.startsWith('Pin alias for ')`),
+      'dismissing the alias editor did not restore focus to its row action');
 
     await api('PUT', `/providers/${providerId}`, { model_map: Object.fromEntries(inventory.map((model) => [model, model])) });
     const provider = (await api('GET', '/providers')).providers.find(({ id }) => id === providerId);
@@ -967,7 +969,7 @@ async function auditPricing(cdp, cookie) {
         signal: AbortSignal.timeout(10_000),
       });
       ok(response.ok && (await response.json()).id === 'smoke-price', `pricing proxy did not succeed for ${model}`);
-      return until(async () => (await api('GET', '/logs')).logs.find((log) => log.model === model),
+      return until(async () => (await api('GET', `/logs?model=${encodeURIComponent(model)}`)).logs.find((log) => log.model === model),
         `pricing proxy log did not commit for ${model}`);
     };
 
@@ -1012,6 +1014,8 @@ async function auditPricing(cdp, cookie) {
     await mobileClick(cdp, 'Save alias', DIALOG);
     await waitDialogClosed();
     ok(await cdp.waitFor(`!(${rowFor(unpricedList, ambiguous)})`), 'pin did not refresh the unpriced list');
+    ok(await cdp.waitFor(`document.activeElement?.id === 'unpriced-models-title'`),
+      'saving an alias did not return focus to the list when its row disappeared');
     const captured = await proxy(ambiguous);
     ok(captured.cost_nano_usd === 64_650 && captured.priced_model === candidates[0] && captured.price_match_type === 'pinned',
       'real proxy request did not persist expected pinned price and cost');
@@ -1081,6 +1085,12 @@ async function auditPricing(cdp, cookie) {
     await mobileRoute(cdp, 'logs');
     ok(await cdp.waitFor(`[...document.querySelectorAll('th')].some((el) => el.innerText === 'Cost')`), 'desktop Cost column missing');
     await logDetail(ambiguous, '$0.00006465', [candidates[0], 'Pinned alias']);
+    await setMobileField(cdp, 'lf-model', long);
+    await cdp.evaluate(`document.getElementById('lf-model').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))`);
+    ok(await cdp.waitFor(`[...document.querySelectorAll('main tbody tr')].filter((row) => row.getClientRects().length).length === 1`),
+      'desktop Logs did not filter to the full-length model name');
+    await logDetail(long, 'Unpriced');
+    await mobileClick(cdp, 'Clear');
     const after = (await api('GET', `/logs?model=${ambiguous}`)).logs.find((log) => log.id === captured.id);
     ok(JSON.stringify(after) === JSON.stringify(captured), 'price and alias edits changed a captured row');
     await mobile(768);

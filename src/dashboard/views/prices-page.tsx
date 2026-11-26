@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ChevronDown, RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
@@ -54,7 +54,7 @@ function MoreRows({ amount, onMore }: { amount: number; onMore: () => void }) {
 function PriceModel({ price, matches, onPin }: {
   price: PriceDTO;
   matches: readonly ModelPriceResolutionDTO[];
-  onPin: (model: ModelPriceResolutionDTO) => void;
+  onPin: (model: ModelPriceResolutionDTO, trigger: HTMLButtonElement) => void;
 }) {
   const { effective_tier: tier } = price;
   const hasTier = tier.state !== 'base';
@@ -74,7 +74,8 @@ function PriceModel({ price, matches, onPin }: {
                 <li className="space-y-2 border-t border-border-subtle pt-2 text-sm" key={match.upstream_model}>
                   <p className="font-mono wrap-anywhere">{match.upstream_model}</p>
                   <p className="text-xs text-muted-foreground">{MATCH_LABEL[match.match_type]}</p>
-                  <Button variant="outline" size="sm" className={ROW_ACTION} onClick={() => onPin(match)}>Pin alias</Button>
+                  <Button variant="outline" size="sm" className={ROW_ACTION} aria-label={'Pin alias for ' + match.upstream_model}
+                    onClick={(event) => onPin(match, event.currentTarget)}>Pin alias</Button>
                 </li>
               ))}
             </ul>
@@ -120,6 +121,29 @@ export default function PricesView() {
   const [unpricedLimit, setUnpricedLimit] = useState(PAGE_SIZE);
   const [pricesLimit, setPricesLimit] = useState(PAGE_SIZE);
   const [dialog, setDialog] = useState<PricingDialog | null>(null);
+  const returnFocus = useRef<{ trigger: HTMLButtonElement; heading: string } | null>(null);
+  const [closing, setClosing] = useState(false);
+  useEffect(() => {
+    if (dialog || !closing || !returnFocus.current) return;
+    const { trigger, heading } = returnFocus.current;
+    const frame = requestAnimationFrame(() => {
+      if (trigger.getClientRects().length && !trigger.disabled) trigger.focus();
+      else document.getElementById(heading)?.focus();
+      returnFocus.current = null;
+      setClosing(false);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [closing, dialog]);
+  function openDialog(next: PricingDialog, trigger: HTMLButtonElement) {
+    const heading = trigger.closest('section[aria-labelledby]')?.getAttribute('aria-labelledby') ?? 'price-table-title';
+    returnFocus.current = { trigger, heading };
+    setClosing(false);
+    setDialog(next);
+  }
+  function closeDialog() {
+    setClosing(true);
+    setDialog(null);
+  }
   const refreshing = useRef(false);
   const refresh = useMutation({
     mutationFn: refreshCatalogPrices,
@@ -142,7 +166,7 @@ export default function PricesView() {
     previous.push(name);
     matches.set(name.priced_model, previous);
   }
-  const pin = (model: ModelPriceResolutionDTO) => setDialog({ kind: 'alias', model });
+  const pin = (model: ModelPriceResolutionDTO, trigger: HTMLButtonElement) => openDialog({ kind: 'alias', model }, trigger);
   const priceColumns: ResponsiveColumn<PriceDTO>[] = [
     {
       key: 'model',
@@ -170,23 +194,24 @@ export default function PricesView() {
           {refresh.isPending ? 'Refreshing prices…' : 'Refresh prices'}
         </Button>
       } />
-      {refresh.isError ? <p role="alert" className="rounded-lg border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">{REFRESH_PRICE_ERROR}</p> : null}
+      {refresh.isError ? <p role="alert" className="rounded-lg border border-destructive/40 bg-destructive/10 p-4 text-sm text-destructive">{REFRESH_PRICE_ERROR}</p> : null}
       {(prices.isError && !prices.data) || (models.isError && !models.data) ? (
         <PageError message={LOAD_MESSAGE} retryName="Retry loading prices"
           onRefresh={() => { void prices.refetch(); void models.refetch(); }} refreshing={prices.isFetching || models.isFetching} />
       ) : null}
       {models.data || models.isPending ? (
-        <section className="flex min-w-0 flex-col gap-3" aria-labelledby="unpriced-models-title">
-          <h2 id="unpriced-models-title" className="text-sm font-semibold">Unpriced models</h2>
+        <section className="flex min-w-0 flex-col gap-4" aria-labelledby="unpriced-models-title">
+          <h2 id="unpriced-models-title" className="text-sm font-semibold" tabIndex={-1}>Unpriced models</h2>
           <ResponsiveList
             rows={unpriced.slice(0, unpricedLimit)}
             columns={unpricedColumns}
             getRowKey={(row) => row.upstream_model}
             renderActions={(row) => (
               <div className="flex flex-wrap gap-2">
-                <Button variant="outline" size="sm" className={ROW_ACTION} onClick={() => pin(row)} disabled={!prices.data}>Pin alias</Button>
-                <Button variant="outline" size="sm" className={ROW_ACTION} disabled={!prices.data}
-                  onClick={() => setDialog({ kind: 'price', model: row.upstream_model, price: byName.get(row.upstream_model), title: 'Set price' })}>
+                <Button variant="outline" size="sm" className={ROW_ACTION} aria-label={'Pin alias for ' + row.upstream_model}
+                  onClick={(event) => pin(row, event.currentTarget)} disabled={!prices.data}>Pin alias</Button>
+                <Button variant="outline" size="sm" className={ROW_ACTION} aria-label={'Set price for ' + row.upstream_model} disabled={!prices.data}
+                  onClick={(event) => openDialog({ kind: 'price', model: row.upstream_model, price: byName.get(row.upstream_model), title: 'Set price' }, event.currentTarget)}>
                   Set price
                 </Button>
               </div>
@@ -199,9 +224,9 @@ export default function PricesView() {
         </section>
       ) : null}
       {prices.data || prices.isPending ? (
-        <section className="flex min-w-0 flex-col gap-3" aria-labelledby="price-table-title">
+        <section className="flex min-w-0 flex-col gap-4" aria-labelledby="price-table-title">
           <div>
-            <h2 id="price-table-title" className="text-sm font-semibold">Price table</h2>
+            <h2 id="price-table-title" className="text-sm font-semibold" tabIndex={-1}>Price table</h2>
             <p className="text-sm text-muted-foreground">USD per 1M tokens</p>
           </div>
           <ResponsiveList
@@ -209,8 +234,8 @@ export default function PricesView() {
             columns={priceColumns}
             getRowKey={(row) => row.model}
             renderActions={(row) => (
-              <Button variant="outline" size="sm" className={ROW_ACTION}
-                onClick={() => setDialog({ kind: 'price', model: row.model, price: row, title: 'Edit price' })}>Edit price</Button>
+              <Button variant="outline" size="sm" className={ROW_ACTION} aria-label={'Edit price for ' + row.model}
+                onClick={(event) => openDialog({ kind: 'price', model: row.model, price: row, title: 'Edit price' }, event.currentTarget)}>Edit price</Button>
             )}
             isLoading={prices.isPending}
             emptyMessage="No prices saved. Refresh prices to import rates for relevant models."
@@ -219,8 +244,8 @@ export default function PricesView() {
           />
         </section>
       ) : null}
-      {dialog?.kind === 'price' ? <PriceEditor model={dialog.model} price={dialog.price} title={dialog.title} onClose={() => setDialog(null)} /> : null}
-      {dialog?.kind === 'alias' ? <AliasEditor model={dialog.model} prices={rows} onClose={() => setDialog(null)} /> : null}
+      {dialog?.kind === 'price' ? <PriceEditor model={dialog.model} price={dialog.price} title={dialog.title} onClose={closeDialog} /> : null}
+      {dialog?.kind === 'alias' ? <AliasEditor model={dialog.model} prices={rows} onClose={closeDialog} /> : null}
     </div>
   );
 }

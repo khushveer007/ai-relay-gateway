@@ -45,9 +45,9 @@ export function PriceEditor({ model, price, title, onClose }: { model: string; p
   const submitting = useRef(false);
   const save = useMutation({
     mutationFn: priceApi.override,
-    onSuccess: () => {
+    onSuccess: async () => {
       toast.success('Price saved.');
-      void queryClient.invalidateQueries({ queryKey: PRICE_QUERY_KEY });
+      await queryClient.invalidateQueries({ queryKey: PRICE_QUERY_KEY });
       onClose();
     },
     onSettled: () => { submitting.current = false; },
@@ -96,7 +96,8 @@ export function PriceEditor({ model, price, title, onClose }: { model: string; p
       const shown = value === undefined ? current : value === null ? catalogRate : null;
       const error = attempted && invalid.has(group + '-' + field) ? 'Enter a non-negative rate.' : undefined;
       const helper = overridden && value !== null
-        ? (catalogRate === null ? 'Catalog rate unavailable' : 'Catalog ' + displayRate(catalogRate))
+        ? 'Override. ' + (catalogRate === null ? 'Catalog rate unavailable' : 'Catalog ' + displayRate(catalogRate))
+        : value === null ? 'Catalog ' + displayRate(catalogRate)
         : shown === null && !value ? 'Rate unavailable' : undefined;
       const set = (next: string | null) => setDraft((prev) => ({ ...prev, [group]: { ...prev[group], [field]: next } }));
       return (
@@ -171,9 +172,9 @@ export function AliasEditor({ model, prices, onClose }: { model: ModelPriceResol
   const modelError = validModelName(model.upstream_model) ? null : INVALID_MODEL;
   const save = useMutation({
     mutationFn: () => priceApi.pin(model.upstream_model, target),
-    onSuccess: () => {
+    onSuccess: async () => {
       toast.success('Alias saved.');
-      void queryClient.invalidateQueries({ queryKey: PRICE_QUERY_KEY });
+      await queryClient.invalidateQueries({ queryKey: PRICE_QUERY_KEY });
       onClose();
     },
     onSettled: () => { submitting.current = false; },

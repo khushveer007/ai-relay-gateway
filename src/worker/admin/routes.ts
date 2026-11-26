@@ -720,8 +720,8 @@ s.get('/logs', async (c) => {
   if (q.status === 'error') where.push('(status < 200 OR status >= 300)');
   if (q.status === 'failover') where.push('failovers > 0');
   if (q.model) {
-    where.push('model LIKE ?');
-    args.push(`%${q.model}%`);
+    where.push('instr(lower(model), lower(?)) > 0');
+    args.push(q.model);
   }
   const sql = `SELECT * FROM request_logs ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY id DESC LIMIT ?`;
   const rows = await c.env.DB.prepare(sql).bind(...args, limit).all();

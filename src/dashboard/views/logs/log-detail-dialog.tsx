@@ -23,10 +23,12 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-function Section({ title, children }: { title: string; children: ReactNode }) {
+function Section({ title, children, titleClassName = 'text-xs tracking-wide text-muted-foreground uppercase' }: {
+  title: string; children: ReactNode; titleClassName?: string;
+}) {
   return (
     <section className="flex flex-col gap-2" aria-label={title}>
-      <h3 className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">{title}</h3>
+      <h3 className={'font-semibold ' + titleClassName}>{title}</h3>
       {children}
     </section>
   );
@@ -91,10 +93,14 @@ export function LogDetailDialog({ log, labels, open, onOpenChange }: LogDetailDi
           </dl>
         </Section>
 
-        <Section title="List-price cost">
+        <Section title="List-price cost" titleClassName="text-sm">
           <dl className="flex flex-col gap-2">
-            <Row label="Cost">{fmtRequestCost(log.cost_nano_usd, log.cost_reason)}</Row>
-            {log.priced_model && <Row label="Priced model">{log.priced_model}</Row>}
+            <Row label="Cost">
+              <span className={log.cost_nano_usd != null ? 'font-mono tabular-nums' : undefined}>
+                {fmtRequestCost(log.cost_nano_usd, log.cost_reason)}
+              </span>
+            </Row>
+            {log.priced_model && <Row label="Priced model"><span className="font-mono">{log.priced_model}</span></Row>}
             {log.price_match_type && <Row label="Match type">{MATCH_LABEL[log.price_match_type]}</Row>}
             {log.price_tier_threshold_tokens != null && (
               <Row label="Long-context threshold">{fmtNum(log.price_tier_threshold_tokens)} tokens</Row>

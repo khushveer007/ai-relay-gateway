@@ -90,7 +90,11 @@ export function logColumns(labels: LogLabels): ResponsiveColumn<LogRowDTO>[] {
       header: 'Cost',
       mobileLabel: 'Cost',
       className: 'whitespace-nowrap',
-      cell: (r) => fmtRequestCost(r.cost_nano_usd, r.cost_reason),
+      cell: (r) => (
+        <span className={r.cost_nano_usd != null ? 'font-mono tabular-nums' : undefined}>
+          {fmtRequestCost(r.cost_nano_usd, r.cost_reason)}
+        </span>
+      ),
     },
     {
       key: 'timing',
