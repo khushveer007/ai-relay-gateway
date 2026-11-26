@@ -113,6 +113,18 @@ describe('DROP-01 request-path guard (real local D1)', () => {
     await proxy?.dispose();
   });
 
+  it('cost migration preserves old logs and installs the retention interlock', async () => {
+    expect(await db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'daily_cost_rollup'").first()).toEqual({ name: 'daily_cost_rollup' });
+    const legacy = await db.prepare('SELECT * FROM request_logs WHERE id = 900').first();
+    expect(legacy).toMatchObject({
+      upstream_model: 'legacy-model', input_tokens: 5, cost_nano_usd: null, cost_reason: null,
+      priced_model: null, price_match_type: null, cache_write_tokens: null, cache_read_savings_nano_usd: null,
+    });
+    const compatible = await db.prepare("INSERT INTO request_logs (ts, upstream_model, input_tokens) VALUES (2, 'old-worker', 2)").run();
+    await expect(db.prepare('DELETE FROM request_logs WHERE id IN (900, ?)').bind(compatible.meta.last_row_id).run()).rejects.toThrow('cost_rollup_required');
+    expect(await db.prepare('SELECT COUNT(*) AS count FROM request_logs WHERE id IN (900, ?)').bind(compatible.meta.last_row_id).first()).toEqual({ count: 2 });
+  });
+
   async function seedKey(seed: Partial<Row> = {}): Promise<number> {
     return seedKeyFor(provider, seed);
   }
