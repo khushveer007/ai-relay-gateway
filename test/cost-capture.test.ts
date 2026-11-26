@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, expect, it, vi } from 'vitest';
-import { getPlatformProxy } from 'wrangler';
+import { getPlatformProxy, unstable_splitSqlQuery } from 'wrangler';
 import initial from '../migrations/0001_init.sql?raw';
 import keyDrop from '../migrations/0002_key_drop.sql?raw';
+import costMigration from '../migrations/0003_cost_capture.sql?raw';
 import { invalidateConfig } from '../src/worker/db/cache';
 import { encrypt, sha256Hex } from '../src/worker/db/crypto';
 import type { Env } from '../src/worker/types';
@@ -19,6 +20,7 @@ beforeAll(async () => {
   for (const statement of (initial + keyDrop).replace(/--.*$/gm, '').split(';')) {
     if (statement.trim()) await db.prepare(statement).run();
   }
+  await db.batch(unstable_splitSqlQuery(costMigration).map((statement) => db.prepare(statement)));
   const enc = await encrypt('local-test-relay-key', env.ENCRYPTION_KEY);
   await db.batch([
     db.prepare("INSERT INTO providers (id, name, base_url, model_map) VALUES (11, 'first', 'https://first.example', '{\"client\":\"first-model\"}'), (12, 'second', 'https://second.example', '{\"client\":\"second-model\"}')"),
@@ -31,6 +33,34 @@ beforeAll(async () => {
 afterAll(async () => {
   invalidateConfig();
   await proxy?.dispose();
+});
+
+it('freezes the Sonnet token cost with the serving model in D1', async () => {
+  invalidateConfig();
+  await db.batch([
+    db.prepare('UPDATE route_providers SET position = CASE provider_id WHEN 11 THEN 1 ELSE 0 END'),
+    db.prepare("INSERT INTO model_prices (model, catalog_imported, catalog_base) VALUES ('second-model', 1, ?)").bind(
+      JSON.stringify({ input: 3000, output: 15000, cache_read: 300, cache_write: 3750 }),
+    ),
+  ]);
+  const fetch = vi.spyOn(globalThis, 'fetch').mockImplementationOnce(async () => Response.json({
+    usage: { input_tokens: 105, cache_read_input_tokens: 7123, cache_creation_input_tokens: 7345, output_tokens: 6039 },
+  }));
+  try {
+    const flow = request();
+    const response = await flow.response;
+    expect(response.status).toBe(200);
+    await response.text();
+    await Promise.all(flow.pending);
+    expect(await db.prepare('SELECT * FROM request_logs ORDER BY id DESC LIMIT 1').first()).toMatchObject({
+      upstream_model: 'second-model', provider_id: 12, key_id: 22,
+      input_tokens: 105, cache_tokens: 7123, cache_write_tokens: 7345, output_tokens: 6039,
+      cost_nano_usd: 120580650, cost_reason: null, priced_model: 'second-model', price_match_type: 'exact',
+      cache_read_savings_nano_usd: 19232100,
+    });
+  } finally {
+    fetch.mockRestore();
+  }
 });
 
 function request(path = '/v1/messages') {
