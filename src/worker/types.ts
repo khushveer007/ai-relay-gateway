@@ -1,3 +1,5 @@
+import type { PriceIndex } from '../shared/pricing';
+
 export type Format = 'anthropic' | 'openai-chat' | 'openai-responses';
 export const ALL_FORMATS: Format[] = ['anthropic', 'openai-chat', 'openai-responses'];
 
@@ -107,6 +109,7 @@ export interface Config {
   rules: ErrorRule[];
   gatewayKeysByHash: Map<string, GatewayKey>;
   settings: Settings;
+  prices: PriceIndex;
 }
 
 export interface Attempt {

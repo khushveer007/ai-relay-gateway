@@ -2,6 +2,8 @@ import { queryOptions } from '@tanstack/react-query';
 import {
   api,
   ApiError,
+  readPriceModels,
+  readPrices,
   type Action,
   type ErrorRuleDTO,
   type GatewayKeyDTO,
@@ -82,4 +84,18 @@ export const settingsQuery = queryOptions({
   queryFn: () => api.get<SettingsDTO>('/settings'),
   staleTime: 15_000,
   refetchOnWindowFocus: true,
+});
+
+export const PRICE_QUERY_KEY = ['prices'] as const;
+
+export const pricesQuery = queryOptions({
+  queryKey: [...PRICE_QUERY_KEY, 'table'],
+  queryFn: readPrices,
+  staleTime: 15_000,
+});
+
+export const priceModelsQuery = queryOptions({
+  queryKey: [...PRICE_QUERY_KEY, 'models'],
+  queryFn: readPriceModels,
+  staleTime: 15_000,
 });

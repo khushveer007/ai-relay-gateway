@@ -3,7 +3,7 @@ import { HttpStatusBadge } from '@/components/status-badge';
 import { TruncatedText, type ResponsiveColumn } from '@/components/responsive-list';
 import { useIsDesktop } from '@/hooks/use-media-query';
 import type { GatewayKeyDTO, LogRowDTO, ProviderDTO, RouteDTO } from '@/lib/api';
-import { fmtAgo, fmtMs, fmtTime, fmtTokensOrDash } from '@/lib/format';
+import { fmtAgo, fmtMs, fmtRequestCost, fmtTime, fmtTokensOrDash } from '@/lib/format';
 import { logModelLine } from '@/lib/logs-filters';
 
 /** Name lookups for a log row. A deleted provider, key, gateway key or route falls back to '#id'; no id is an em dash. */
@@ -86,6 +86,17 @@ export function logColumns(labels: LogLabels): ResponsiveColumn<LogRowDTO>[] {
     },
     { key: 'status', header: 'Status', desktopOnly: true, cell: (r) => <HttpStatusBadge status={r.status} /> },
     {
+      key: 'cost',
+      header: 'Cost',
+      mobileLabel: 'Cost',
+      className: 'whitespace-nowrap',
+      cell: (r) => (
+        <span className={r.cost_nano_usd != null ? 'font-mono tabular-nums' : undefined}>
+          {fmtRequestCost(r.cost_nano_usd, r.cost_reason)}
+        </span>
+      ),
+    },
+    {
       key: 'timing',
       header: 'TTFB / Total',
       desktopOnly: true,
@@ -110,5 +121,6 @@ export function logColumns(labels: LogLabels): ResponsiveColumn<LogRowDTO>[] {
 
 /** Accessible name of a tappable row. */
 export function logRowLabel(row: LogRowDTO): string {
-  return `Request at ${fmtTime(row.ts)}, ${logModelLine(row)}, HTTP ${row.status}. Open details.`;
+  const cost = fmtRequestCost(row.cost_nano_usd, row.cost_reason);
+  return `Request at ${fmtTime(row.ts)}, ${logModelLine(row)}, HTTP ${row.status}. Cost: ${cost}. Open details.`;
 }

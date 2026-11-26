@@ -1,3 +1,5 @@
+import { compareModelNames, type MatchType, type PriceTier, type RateFields } from '../../shared/pricing';
+
 export type Format = 'anthropic' | 'openai-chat' | 'openai-responses';
 export type Action = 'EXHAUSTED' | 'INVALID_KEY' | 'RATE_LIMITED' | 'UPSTREAM_ERROR' | 'CLIENT_ERROR';
 export type KeyStatus = 'active' | 'exhausted' | 'rate_limited' | 'invalid' | 'disabled';
@@ -115,6 +117,13 @@ export interface LogRowDTO {
   input_tokens: number | null;
   output_tokens: number | null;
   cache_tokens: number | null;
+  cache_write_tokens: number | null;
+  cost_nano_usd: number | null;
+  cost_reason: 'unpriced' | 'no_usage' | null;
+  priced_model: string | null;
+  price_match_type: MatchType | null;
+  price_tier_threshold_tokens: number | null;
+  cache_read_savings_nano_usd: number | null;
   failovers: number;
   attempts: AttemptDTO[];
   error: string | null;
@@ -227,3 +236,94 @@ export const api = {
   put: <T>(path: string, body?: unknown) => request<T>('PUT', path, body),
   del: <T>(path: string) => request<T>('DELETE', path, {}),
 };
+
+export interface PriceDTO {
+  model: string;
+  catalog_imported: boolean;
+  catalog_base: RateFields;
+  override_base: RateFields;
+  effective_base: RateFields;
+  catalog_tier: PriceTier;
+  override_tier: RateFields;
+  effective_tier: PriceTier;
+}
+
+export interface ModelPriceResolutionDTO {
+  upstream_model: string;
+  priced_model: string | null;
+  match_type: MatchType;
+  candidates: string[];
+}
+
+export interface CatalogPriceInput {
+  model: string;
+  base: RateFields;
+  tier?: PriceTier;
+}
+
+export interface PriceOverrideInput {
+  model: string;
+  base?: Partial<RateFields>;
+  tier?: Partial<RateFields>;
+}
+
+interface PricePage {
+  next_after: string | null;
+  version: number;
+}
+
+export const priceApi = {
+  list: (after: string | null) => api.get<PricePage & { prices: PriceDTO[] }>(
+    '/prices' + (after === null ? '' : '?after=' + encodeURIComponent(after)),
+  ),
+  models: (after: string | null) => after !== null && encodeURIComponent(after).length > 4096
+    ? api.post<PricePage & { models: ModelPriceResolutionDTO[] }>('/prices/models', { after })
+    : api.get<PricePage & { models: ModelPriceResolutionDTO[] }>(
+        '/prices/models' + (after === null ? '' : '?after=' + encodeURIComponent(after)),
+      ),
+  import: (prices: CatalogPriceInput[]) => api.post<{ ok: true }>('/prices/import', { prices }),
+  override: (input: PriceOverrideInput) => api.put<{ ok: true }>('/prices/override', input),
+  pin: (upstream_model: string, priced_model: string) => api.put<{ ok: true }>('/prices/alias', { upstream_model, priced_model }),
+};
+
+async function collectPages<K extends string, T>(
+  key: K,
+  read: (after: string | null) => Promise<PricePage & Record<K, T[]>>,
+  name: (row: T) => string,
+) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let after: string | null = null;
+    let version: number | undefined;
+    const rows: T[] = [];
+    for (;;) {
+      const page = await read(after);
+      if (!Number.isSafeInteger(page?.version) || !Array.isArray(page?.[key])) throw new Error('Invalid pricing page');
+      if (version !== undefined && version !== page.version) break;
+      version = page.version;
+      let previous: string = after ?? '';
+      for (const row of page[key]) {
+        const current = name(row);
+        if (typeof current !== 'string' || compareModelNames(previous, current) >= 0) throw new Error('Invalid pricing page order');
+        previous = current;
+      }
+      rows.push(...page[key]);
+      const next: string | null = page.next_after;
+      if (next === null) return { rows, version };
+      if (typeof next !== 'string' || next !== previous || next === after || page[key].length === 0) {
+        throw new Error('Pricing page cursor did not advance');
+      }
+      after = next;
+    }
+  }
+  throw new Error('Prices changed while loading.');
+}
+
+export async function readPrices() {
+  const { rows: prices, version } = await collectPages('prices', priceApi.list, (row) => row.model);
+  return { prices, version };
+}
+
+export async function readPriceModels() {
+  const { rows: models, version } = await collectPages('models', priceApi.models, (row) => row.upstream_model);
+  return { models, version };
+}

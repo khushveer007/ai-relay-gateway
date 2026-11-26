@@ -2,8 +2,10 @@ import { useQuery } from '@tanstack/react-query';
 import { PageError } from '@/components/page-error';
 import { useLoadErrorToast } from '@/hooks/use-load-error-toast';
 import { useRange } from '@/hooks/use-range';
-import { providersQuery, statsQuery } from '@/lib/queries';
+import { priceModelsQuery, providersQuery, statsQuery } from '@/lib/queries';
+import { droppedKeyNames, unpricedModelNames } from '@/lib/overview';
 import { OverviewHeader } from './overview/overview-header';
+import { NeedsAttention } from './overview/needs-attention';
 import { KpiCards } from './overview/kpi-cards';
 import { TrafficChart } from './overview/traffic-chart';
 import { AttemptOutcomes } from './overview/attempt-outcomes';
@@ -19,6 +21,7 @@ export default function OverviewView() {
   const [range, setRange] = useRange();
   const statsQ = useQuery(statsQuery(range));
   const providersQ = useQuery(providersQuery);
+  const modelsQ = useQuery(priceModelsQuery);
 
   // D-08: stats/providers are read as failed only once their own fetch has settled, and the
   // failed branch never reads cached `data` (UI-SPEC error contract: never show stale numbers as
@@ -32,12 +35,13 @@ export default function OverviewView() {
   useLoadErrorToast(statsQ, 'overview-load', LOAD_MESSAGE);
   useLoadErrorToast(providersQ, 'overview-load', LOAD_MESSAGE);
 
-  const isFetching = statsQ.isFetching || providersQ.isFetching;
+  const isFetching = statsQ.isFetching || providersQ.isFetching || modelsQ.isFetching;
   const anyFailed = statsFailed || providersFailed;
 
   function handleRefresh(): void {
     void statsQ.refetch();
     void providersQ.refetch();
+    void modelsQ.refetch();
   }
 
   return (
@@ -48,6 +52,12 @@ export default function OverviewView() {
         onRefresh={handleRefresh}
         isFetching={isFetching}
         updatedAt={statsQ.dataUpdatedAt}
+      />
+      <NeedsAttention
+        dropped={providersFailed ? { status: 'error' } : providers ? { status: 'ready', names: droppedKeyNames(providers) } : { status: 'loading' }}
+        unpriced={modelsQ.isError && !modelsQ.isFetching
+          ? { status: 'error' }
+          : modelsQ.data ? { status: 'ready', names: unpricedModelNames(modelsQ.data.models) } : { status: 'loading' }}
       />
       {anyFailed && <PageError message={LOAD_MESSAGE} onRefresh={handleRefresh} refreshing={isFetching} />}
       <KpiCards

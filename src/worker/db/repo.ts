@@ -1,3 +1,4 @@
+import { buildPriceIndex, type PriceAlias, type PriceRecord } from '../../shared/pricing';
 import type {
   Config,
   ErrorRule,
@@ -107,10 +108,21 @@ export function parseSettings(rows: Row[]): Settings {
   };
 }
 
+export function parsePrice(r: Row): PriceRecord {
+  return {
+    model: String(r.model),
+    catalog_imported: r.catalog_imported === 1,
+    catalog_base: json(r.catalog_base, {}),
+    override_base: json(r.override_base, {}),
+    catalog_tier: json(r.catalog_tier, { state: 'base', threshold_tokens: null, rates: {} }),
+    override_tier: json(r.override_tier, {}),
+  };
+}
+
 /** Loads the full routing configuration in a single D1 round-trip (batch). */
 export async function loadConfig(db: D1Database): Promise<Config> {
   if (!db) throw new Error('D1 database binding DB is not configured');
-  const [p, k, r, rp, er, gk, s] = await db.batch([
+  const [p, k, r, rp, er, gk, s, prices, aliases] = await db.batch([
     db.prepare('SELECT * FROM providers ORDER BY id'),
     db.prepare('SELECT * FROM provider_keys ORDER BY provider_id, priority, id'),
     db.prepare('SELECT * FROM routes ORDER BY position, id'),
@@ -118,6 +130,8 @@ export async function loadConfig(db: D1Database): Promise<Config> {
     db.prepare('SELECT * FROM error_rules WHERE enabled = 1 ORDER BY (provider_id IS NULL), priority, id'),
     db.prepare('SELECT * FROM gateway_keys'),
     db.prepare('SELECT key, value FROM settings'),
+    db.prepare('SELECT * FROM model_prices'),
+    db.prepare('SELECT upstream_model, priced_model FROM model_price_aliases'),
   ]);
 
   const providers = new Map<number, Provider>();
@@ -164,6 +178,7 @@ export async function loadConfig(db: D1Database): Promise<Config> {
     rules: ((er?.results ?? []) as Row[]).map(parseRule),
     gatewayKeysByHash,
     settings,
+    prices: buildPriceIndex(((prices?.results ?? []) as Row[]).map(parsePrice), (aliases?.results ?? []) as unknown as PriceAlias[]),
   };
 }
 

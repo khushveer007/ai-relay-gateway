@@ -3,7 +3,7 @@ import { Button } from '@/components/ui/button';
 import { ActionBadge, HttpStatusBadge } from '@/components/status-badge';
 import { ResponsiveDialog } from '@/components/responsive-dialog';
 import type { LogRowDTO } from '@/lib/api';
-import { fmtMs, fmtTime, fmtTokensOrDash, plainActionText } from '@/lib/format';
+import { fmtMs, fmtNum, fmtRequestCost, fmtTime, fmtTokensOrDash, MATCH_LABEL, plainActionText } from '@/lib/format';
 import { logModelLine } from '@/lib/logs-filters';
 import type { LogLabels } from './log-columns';
 
@@ -18,15 +18,17 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="flex flex-col gap-0.5">
       <dt className="text-xs font-semibold text-muted-foreground">{label}</dt>
-      <dd className="min-w-0 text-sm break-words">{children}</dd>
+      <dd className="min-w-0 text-sm wrap-anywhere">{children}</dd>
     </div>
   );
 }
 
-function Section({ title, children }: { title: string; children: ReactNode }) {
+function Section({ title, children, titleClassName = 'text-xs tracking-wide text-muted-foreground uppercase' }: {
+  title: string; children: ReactNode; titleClassName?: string;
+}) {
   return (
     <section className="flex flex-col gap-2" aria-label={title}>
-      <h3 className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">{title}</h3>
+      <h3 className={'font-semibold ' + titleClassName}>{title}</h3>
       {children}
     </section>
   );
@@ -86,8 +88,27 @@ export function LogDetailDialog({ log, labels, open, onOpenChange }: LogDetailDi
           <dl className="flex flex-col gap-2">
             <Row label="Input">{fmtTokensOrDash(log.input_tokens)}</Row>
             <Row label="Output">{fmtTokensOrDash(log.output_tokens)}</Row>
-            <Row label="Cache">{fmtTokensOrDash(log.cache_tokens)}</Row>
+            <Row label="Cache read">{fmtTokensOrDash(log.cache_tokens)}</Row>
+            <Row label="Cache write">{fmtTokensOrDash(log.cache_write_tokens)}</Row>
           </dl>
+        </Section>
+
+        <Section title="List-price cost" titleClassName="text-sm">
+          <dl className="flex flex-col gap-2">
+            <Row label="Cost">
+              <span className={log.cost_nano_usd != null ? 'font-mono tabular-nums' : undefined}>
+                {fmtRequestCost(log.cost_nano_usd, log.cost_reason)}
+              </span>
+            </Row>
+            {log.priced_model && <Row label="Priced model"><span className="font-mono">{log.priced_model}</span></Row>}
+            {log.price_match_type && <Row label="Match type">{MATCH_LABEL[log.price_match_type]}</Row>}
+            {log.price_tier_threshold_tokens != null && (
+              <Row label="Long-context threshold">{fmtNum(log.price_tier_threshold_tokens)} tokens</Row>
+            )}
+          </dl>
+          {log.price_match_type == null && log.cost_nano_usd == null && log.cost_reason == null && (
+            <p className="text-sm text-muted-foreground">Pricing details weren’t recorded for this request.</p>
+          )}
         </Section>
 
         <Section title="Attempts">
@@ -105,7 +126,7 @@ export function LogDetailDialog({ log, labels, open, onOpenChange }: LogDetailDi
                     <ActionBadge action={a.action} />
                     <span className="font-mono text-xs text-muted-foreground">{a.ms} ms</span>
                   </div>
-                  <p className="text-sm break-words">
+                  <p className="text-sm wrap-anywhere">
                     {a.provider} · {a.key} · model {a.model || DASH}
                   </p>
                   {a.reason ? <p className="text-xs break-words text-muted-foreground">{plainActionText(a.reason)}</p> : null}
