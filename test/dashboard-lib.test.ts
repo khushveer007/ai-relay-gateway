@@ -17,6 +17,7 @@ import {
   plainActionText,
 } from '../src/dashboard/lib/format';
 import { ALL_ACTIONS } from '../src/worker/types';
+import * as overview from '../src/dashboard/lib/overview';
 import {
   DEFAULT_RANGE,
   RANGES,
@@ -52,6 +53,27 @@ it('formats frozen request cost, zero, and all missing-cost states', () => {
   expect(fmtRequestCost(null, 'no_usage')).toBe('No usage reported');
   expect(fmtRequestCost(null, null)).toBe('Cost unavailable');
   expect(fmtRequestCost(undefined)).toBe('Cost unavailable');
+});
+
+it('counts and orders complete attention inventories before taking three names', () => {
+  const { droppedKeyNames, unpricedModelNames } = overview as Record<string, Function>;
+  expect(droppedKeyNames).toBeTypeOf('function');
+  expect(unpricedModelNames).toBeTypeOf('function');
+  expect(droppedKeyNames([])).toEqual([]);
+  const key = (id: number, alias: string, status = 'invalid') => ({ id, alias, key_hint: 'hint', status });
+  expect(droppedKeyNames([{ name: 'Only', keys: [key(9, '')] }])).toEqual(['Only / hint']);
+  expect(droppedKeyNames([
+    { name: 'Zebra', keys: [key(2, 'z'), key(5, 'disabled', 'disabled')] },
+    { name: 'Alpha', keys: [key(4, 'same'), key(1, 'same'), key(3, ''), key(6, 'exhausted', 'exhausted')] },
+  ])).toEqual(['Alpha / hint', 'Alpha / same', 'Alpha / same', 'Zebra / z']);
+  const model = (upstream_model: string, priced_model: string | null = null) => ({ upstream_model, priced_model });
+  expect(unpricedModelNames([])).toEqual([]);
+  expect(unpricedModelNames([model('only')])).toEqual(['only']);
+  expect(unpricedModelNames([model('c'), model('b'), model('a'), model('b')])).toEqual(['a', 'b', 'c']);
+  const laterPage = Array.from({ length: 51 }, (_, i) => model(`model-${String(i).padStart(2, '0')}`));
+  expect(unpricedModelNames([model('zero', 'zero'), ...laterPage.toReversed(), model('model-00')])).toEqual(
+    laterPage.map((entry) => entry.upstream_model),
+  );
 });
 
 const NOW = Date.UTC(2026, 10, 14, 12, 0, 0);
