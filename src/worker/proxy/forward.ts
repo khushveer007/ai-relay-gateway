@@ -6,6 +6,7 @@ import { mapModel, supportsModel } from '../routing/model-map';
 import { resolveRoute } from '../routing/resolve-route';
 import { isUsable, orderKeys } from '../routing/select-key';
 import type { Attempt, Config, Env, Format, GatewayKey, Provider } from '../types';
+import { resolvePrice, type PriceIndex, type PriceResolution } from '../../shared/pricing';
 import {
   buildClientHeaders,
   buildUpstreamHeaders,
@@ -218,7 +219,8 @@ export async function handleProxy(req: Request, env: Env, ctx: ExecutionContext)
             failure = { status: 200, text: peek.headText, headers: res.headers, cls: classify(config.rules, provider.id, 200, peek.headText) };
           } else {
             log.ttfb_ms = Date.now() - started;
-            success = streamToClient(peek, res, provider, attempt, log, env, ctx, started);
+            const resolution = resolvePrice(config.prices, upstreamModel);
+            success = streamToClient(peek, res, provider, attempt, log, env, ctx, started, config.prices, resolution);
           }
         } else {
           clearTimeout(timer);
@@ -250,7 +252,9 @@ export async function handleProxy(req: Request, env: Env, ctx: ExecutionContext)
         if (!log.stream) {
           log.status = success.status;
           log.latency_ms = Date.now() - started;
-          ctx.waitUntil(writeLog(env, log));
+          const prices = config.prices;
+          const resolution = resolvePrice(prices, upstreamModel);
+          ctx.waitUntil(Promise.resolve().then(() => writeLog(env, log, prices, resolution)));
         }
         if (key.status !== 'active') {
           ctx.waitUntil(applyKeyPatch(env, key, ACTIVE_PATCH).catch((error) => console.error('key state write failed', error)));
@@ -323,6 +327,7 @@ function applyUsage(log: LogEntry, u: Usage | null): void {
   log.input_tokens = u.input;
   log.output_tokens = u.output;
   log.cache_tokens = u.cache;
+  log.cache_write_tokens = u.cacheWrite;
 }
 
 /**
@@ -338,6 +343,8 @@ function streamToClient(
   env: Env,
   ctx: ExecutionContext,
   started: number,
+  prices: PriceIndex,
+  resolution: PriceResolution,
 ): Response {
   const tap = provider.parse_usage ? new UsageTap() : null;
   const reader = peek.reader;
@@ -346,7 +353,7 @@ function streamToClient(
 
   let resolveDone!: () => void;
   const done = new Promise<void>((r) => (resolveDone = r));
-  ctx.waitUntil(done.then(() => writeLog(env, log)));
+  ctx.waitUntil(done.then(() => writeLog(env, log, prices, resolution)));
 
   let finished = false;
   const finish = (error?: string) => {

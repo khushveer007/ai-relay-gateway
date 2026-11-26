@@ -264,11 +264,34 @@ describe('SSE Stream Peek & Token Usage Tap', () => {
     const tap1 = new UsageTap();
     tap1.feedText('event: message_start\ndata: {"message":{"usage":{"input_tokens":420,"cache_read_input_tokens":100}}}\n\n');
     tap1.feedText('event: message_delta\ndata: {"usage":{"output_tokens":85}}\n\n');
-    expect(tap1.usage).toEqual({ input: 420, output: 85, cache: 100 });
+    expect(tap1.usage).toEqual({ input: 420, output: 85, cache: 100, cacheWrite: null });
 
     const tap2 = new UsageTap();
     tap2.feedText('data: {"choices":[],"usage":{"prompt_tokens":50,"completion_tokens":25,"prompt_tokens_details":{"cached_tokens":10}}}\n\n');
-    expect(tap2.usage).toEqual({ input: 50, output: 25, cache: 10 });
+    expect(tap2.usage).toEqual({ input: 50, output: 25, cache: 10, cacheWrite: null });
+  });
+
+  it('only records complete safe counts at every cache-write chunk boundary', () => {
+    const encoder = new TextEncoder();
+    for (const name of ['cache_creation_input_tokens', 'cached_creation_tokens', 'cache_write_tokens']) {
+      const wire = 'data: {"usage":{"' + name + '":7345}}\n\n';
+      for (let split = 0; split <= wire.length; split++) {
+        const tap = new UsageTap();
+        tap.feed(encoder.encode(wire.slice(0, split)));
+        tap.feed(encoder.encode(wire.slice(split)));
+        expect(tap.usage.cacheWrite, name + ' split ' + split).toBe(7345);
+      }
+    }
+    for (const raw of ['01', '1.3', '1e3', '-10', '2abc', '"7"', '9007199254740992', '9223372036854775807']) {
+      const tap = new UsageTap();
+      tap.feedText('{"usage":{"cache_creation_input_tokens":' + raw + ',"input_tokens":0}}');
+      expect(tap.usage).toEqual({ input: 0, output: null, cache: null, cacheWrite: null });
+    }
+    const tap = new UsageTap();
+    tap.feedText('{"usage":{"input_tokens":9007199254740991,"cache_creation_input_tokens":7');
+    expect(tap.usage).toEqual({ input: Number.MAX_SAFE_INTEGER, output: null, cache: null, cacheWrite: null });
+    tap.feedText('3}}');
+    expect(tap.usage.cacheWrite).toBe(73);
   });
 
   it('rewrites model in request JSON without full parse', () => {

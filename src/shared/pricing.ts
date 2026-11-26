@@ -150,6 +150,7 @@ export function resolvePrice(index: PriceIndex, model: string | null): PriceReso
 /** Convert decimal list rates without rounding through binary floating point arithmetic. */
 export function quantizeRate(value: unknown, unit: 'usd_per_token' | 'usd_per_million' = 'usd_per_token'): number | null {
   if (typeof value !== 'number' && typeof value !== 'string') return null;
+  if (Object.is(value, -0)) return null;
   const decimal = String(value);
   if (decimal.length > 128) return null;
   const match = /^\+?(?:(\d+)(?:\.(\d*))?|\.(\d+))(?:[eE]([+-]?\d+))?$/.exec(decimal);
@@ -169,4 +170,83 @@ export function quantizeRate(value: unknown, unit: 'usd_per_token' | 'usd_per_mi
   const divisor = 10n ** BigInt(-scale);
   if (coefficient > cap * divisor) return null;
   return Number((coefficient + divisor / 2n) / divisor);
+}
+
+export interface TokenUsage {
+  input: number | null;
+  output: number | null;
+  cache: number | null;
+  cacheWrite: number | null;
+}
+
+export interface CapturedPrice {
+  cost_nano_usd: number | null;
+  cost_reason: 'unpriced' | 'no_usage' | null;
+  priced_model: string | null;
+  price_match_type: MatchType;
+  price_tier_threshold_tokens: number | null;
+  cache_read_savings_nano_usd: number | null;
+}
+
+function roundNano(pico: bigint): number | null {
+  const absolute = pico < 0n ? -pico : pico;
+  const nano = (absolute + 500n) / 1000n;
+  if (nano > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+  return Number(pico < 0n ? -nano : nano);
+}
+
+export function priceUsage(
+  index: PriceIndex | null,
+  resolution: PriceResolution | null,
+  format: string,
+  usage: TokenUsage,
+): CapturedPrice {
+  const price = resolution?.priced_model ? index?.exact.get(resolution.priced_model) : undefined;
+  const result: CapturedPrice = {
+    cost_nano_usd: null,
+    cost_reason: 'no_usage',
+    priced_model: resolution?.priced_model ?? null,
+    price_match_type: resolution?.match_type ?? 'none',
+    price_tier_threshold_tokens: null,
+    cache_read_savings_nano_usd: null,
+  };
+  const raw = [usage.input, usage.output, usage.cache, usage.cacheWrite];
+  if (raw.every((count) => count === null)) return result;
+  result.cost_reason = 'unpriced';
+  if (!price || raw.some((count) => count !== null && (!Number.isSafeInteger(count) || count < 0))) return result;
+
+  const [input, output, read, write] = raw.map((count) => BigInt(count ?? 0));
+  const anthropic = format === 'anthropic';
+  const ordinary = anthropic ? input : input > read + write ? input - read - write : 0n;
+  let rates = price.base;
+  if (price.tier.state !== 'base' && input + output + read + write > 0n) {
+    const threshold = price.tier.threshold_tokens;
+    if (threshold === null) return result;
+    const basis = anthropic || usage.input === null ? input + read + write : input;
+    const above = basis > BigInt(threshold);
+    if (usage.input === null && !above) return result;
+    if (above) {
+      if (price.tier.state !== 'supported') return result;
+      result.price_tier_threshold_tokens = threshold;
+      rates = price.tier.rates;
+    }
+  }
+
+  if (read > 0n && rates.input !== null && rates.cache_read !== null) {
+    result.cache_read_savings_nano_usd = roundNano((BigInt(rates.input) - BigInt(rates.cache_read)) * read);
+  }
+  const counts = [ordinary, output, read, write];
+  let total = 0n;
+  for (const [i, name] of RATE_FIELDS.entries()) {
+    if (counts[i] === 0n) continue;
+    const rate = rates[name];
+    if (rate === null) return result;
+    total += BigInt(rate) * counts[i];
+  }
+  result.cost_nano_usd = roundNano(total);
+  if (result.cost_nano_usd !== null) {
+    result.cost_reason = null;
+    if (read === 0n) result.cache_read_savings_nano_usd = 0;
+  }
+  return result;
 }
